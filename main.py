@@ -26,12 +26,10 @@ connected_agents: dict[str, dict] = {}
 
 @app.get("/api/get-agents")
 async def get_agents():
-    # ... (código sin cambios)
     return [agent_data["details"] for agent_data in connected_agents.values() if "details" in agent_data]
 
 @app.post("/api/send-command")
 async def send_command(command: dict):
-    # ... (código sin cambios)
     target_id = command.get("target_id")
     if not target_id or target_id not in connected_agents:
         return {"status": "error", "message": "Agente no conectado"}
@@ -45,7 +43,6 @@ async def send_command(command: dict):
 
 @app.websocket("/ws/{device_id}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str):
-    # ... (código sin cambios)
     await websocket.accept()
     connected_agents[device_id] = {"ws": websocket}
     try:
