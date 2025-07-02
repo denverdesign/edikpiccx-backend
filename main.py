@@ -1,4 +1,3 @@
-
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,34 +6,36 @@ from typing import List, Dict
 from datetime import datetime
 import time
 
-# --- INICIALIZACIÓN Y CONFIGURACIÓN ---
-app = FastAPI(title="Centro de Operaciones de Agentes v4.0")
+# --- INICIALIZACIÓN DE LA APLICACIÓN ---
+app = FastAPI(title="Centro de Operaciones de Agentes v4.1")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- "BASE DE DATOS" EN MEMORIA MEJORADA ---
-# Guardaremos más que solo el websocket
-# Formato: { "device_id": {"ws": ws_obj, "name": "...", "connect_time": timestamp} }
+# --- "BASE DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, dict] = {}
-
-# Una lista para registrar los últimos 20 eventos importantes (errores, conexiones, etc.)
 server_events: List[Dict] = []
+device_thumbnails_cache: dict[str, list] = {}
 
 # --- FUNCIÓN DE AYUDA PARA LOGS ---
 def log_event(event_type: str, message: str, device_id: str = None):
-    """Añade un evento a nuestra lista en memoria con timestamp."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     log_entry = {"timestamp": timestamp, "type": event_type, "message": message, "device_id": device_id}
     print(f"[{event_type.upper()}] {message}")
-    server_events.insert(0, log_entry) # Insertamos al principio
-    # Mantenemos la lista con un tamaño manejable
-    if len(server_events) > 20:
+    server_events.insert(0, log_entry)
+    if len(server_events) > 50: # Guardamos hasta 50 eventos
         server_events.pop()
 
-# --- MODELOS DE DATOS ---
-class Command(BaseModel): # ... (sin cambios)
-class Thumbnail(BaseModel): # ... (sin cambios)
+# --- MODELOS DE DATOS (AHORA COMPLETOS) ---
+class Command(BaseModel):
+    target_id: str
+    action: str
+    payload: str
+
+class Thumbnail(BaseModel):
+    filename: str
+    thumbnail_b64: str
+
 class ErrorLog(BaseModel):
     error: str
 
@@ -52,33 +53,23 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         log_event("DISCONNECT", f"Agente desconectado: '{name_to_print}'", device_id)
         if device_id in connected_agents: del connected_agents[device_id]
+        if device_id in device_thumbnails_cache: del device_thumbnails_cache[device_id]
 
 
-# --- NUEVO ENDPOINT DE DIAGNÓSTICO ---
 @app.get("/api/health_check")
 async def health_check():
-    """
-    Devuelve un informe completo del estado del sistema:
-    - Estado del servidor ("Activo" o "Dormido" - simulado).
-    - Lista de agentes conectados.
-    - Log de los últimos eventos.
-    """
     return {
-        "server_status": "Activo", # Si esta ruta responde, el servidor está activo.
+        "server_status": "Activo",
         "server_time_utc": datetime.utcnow().isoformat(),
-        "connected_agents": [
-            {"id": dev_id, "name": data["name"]} for dev_id, data in connected_agents.items()
-        ],
+        "connected_agents": [{"id": dev_id, "name": data["name"]} for dev_id, data in connected_agents.items()],
         "recent_events": server_events
     }
 
-# --- Ruta para que los agentes reporten sus errores ---
 @app.post("/api/log_error/{device_id}")
 async def log_error_from_agent(device_id: str, error_log: ErrorLog):
     log_event("AGENT_ERROR", error_log.error, device_id)
     return {"status": "log recibido"}
 
-# El resto de las rutas no cambian, pero ahora usan log_event
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
     target_id = command.target_id
@@ -94,8 +85,17 @@ async def send_command_to_agent(command: Command):
         log_event("ERROR", f"Fallo al enviar comando a {target_id}: {e}", target_id)
         return {"status": "error", "message": "Fallo de comunicación."}
 
-# Las rutas de miniaturas no necesitan grandes cambios
-@app.post("/api/submit_media_list/{device_id}") # ... (sin cambios)
-@app.get("/api/get_media_list/{device_id}") # ... (sin cambios)
+@app.post("/api/submit_media_list/{device_id}")
+async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
+    if device_id not in connected_agents:
+        return {"status": "error", "message": "Agente no registrado."}
+    log_event("INFO", f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents[device_id]['name']}'", device_id)
+    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
+    return {"status": "success"}
+
+@app.get("/api/get_media_list/{device_id}")
+async def get_media_list(device_id: str):
+    log_event("INFO", f"Panel pide la lista de medios para el agente con ID: {device_id[:8]}...", device_id)
+    return device_thumbnails_cache.get(device_id, [])
 
 log_event("STARTUP", "El servidor se ha iniciado correctamente.")
