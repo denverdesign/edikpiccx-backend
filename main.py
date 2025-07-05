@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
 from datetime import datetime
+import time
 
 # --- INICIALIZACIÓN DE LA APLICACIÓN ---
 app = FastAPI(title="Agente Control Backend vFINAL")
@@ -18,16 +19,10 @@ app.add_middleware(
 )
 
 # --- "BASE DE DATOS" EN MEMORIA ---
-# Diccionario para mantener los agentes conectados.
-# Formato: { "device_id": {"ws": websocket_object, "name": "device_name"} }
 connected_agents: Dict[str, dict] = {}
-
-# Diccionario para la caché temporal de las miniaturas.
-# Formato: { "device_id": [ {"filename": "...", "thumbnail_b64": "..."} ] }
 device_thumbnails_cache: Dict[str, list] = {}
 
-
-# --- MODELOS DE DATOS (para validación automática) ---
+# --- MODELOS DE DATOS ---
 class Command(BaseModel):
     target_id: str
     action: str
@@ -39,7 +34,6 @@ class Thumbnail(BaseModel):
 
 class ErrorLog(BaseModel):
     error: str
-
 
 # --- ENDPOINTS (RUTAS DE LA API) ---
 
@@ -57,7 +51,6 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        # Si el agente se desconecta, lo eliminamos de nuestras listas para mantener todo limpio.
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
         if device_id in connected_agents:
@@ -96,7 +89,6 @@ async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
     if device_id not in connected_agents:
         return {"status": "error", "message": "Agente no registrado."}
     
-    # Guardamos la lista de miniaturas en nuestra caché temporal
     device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
     print(f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents.get(device_id, {}).get('name', 'Desconocido')}'")
     return {"status": "success"}
@@ -106,7 +98,6 @@ async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
 async def get_media_list(device_id: str):
     """Ruta para que el panel pida la lista de miniaturas de un dispositivo."""
     print(f"Panel pide la lista de medios para el agente con ID: {device_id[:8]}...")
-    # Devolvemos la lista desde la caché, o una lista vacía si no existe
     return device_thumbnails_cache.get(device_id, [])
 
 
