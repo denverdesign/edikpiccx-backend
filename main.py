@@ -97,3 +97,8 @@ async def log_error_from_agent(device_id: str, error_log: ErrorLog):
     """Ruta para que los agentes reporten errores para depuración remota."""
     print(f"[ERROR REMOTO] Dispositivo {device_id[:8]}: {error_log.error}")
     return {"status": "log recibido"}
+
+@app.get("/")
+def read_root():
+    return {"status": "API backend funcionando correctamente"}
+
