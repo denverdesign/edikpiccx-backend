@@ -1,10 +1,11 @@
+
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
 from datetime import datetime
-import time
+from fastapi.encoders import jsonable_encoder
 
 # --- INICIALIZACIÓN DE LA APLICACIÓN ---
 app = FastAPI(title="Agente Control Backend vFINAL")
@@ -44,21 +45,18 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     connected_agents[device_id] = {"ws": websocket, "name": device_name}
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            print(f"[MENSAJE] De {device_id}: {data}")
     except WebSocketDisconnect:
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
-        if device_id in connected_agents:
-            del connected_agents[device_id]
-        if device_id in device_thumbnails_cache:
-            del device_thumbnails_cache[device_id]
+        connected_agents.pop(device_id, None)
+        device_thumbnails_cache.pop(device_id, None)
 
 
 @app.get("/api/get-agents")
 async def get_agents():
     """Devuelve la lista de agentes actualmente conectados."""
-    if not connected_agents:
-        return []
     agent_list = [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
     return agent_list
 
@@ -72,9 +70,11 @@ async def send_command_to_agent(command: Command):
     try:
         await connected_agents[target_id]["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado."}
+    except WebSocketDisconnect:
+        return {"status": "error", "message": "Agente desconectado. WebSocket falló."}
     except Exception as e:
         print(f"[ERROR] Fallo al enviar comando a {target_id}: {e}")
-        return {"status": "error", "message": "Fallo de comunicación con el agente."}
+        return {"status": "error", "message": f"Fallo de comunicación con el agente: {str(e)}"}
 
 
 @app.post("/api/submit_media_list/{device_id}")
@@ -82,7 +82,7 @@ async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
     """Ruta para que el agente envíe la lista de sus miniaturas."""
     if device_id not in connected_agents:
         return {"status": "error", "message": "Agente no registrado."}
-    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
+    device_thumbnails_cache[device_id] = jsonable_encoder(thumbnails)
     return {"status": "success"}
 
 
