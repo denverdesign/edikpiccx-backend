@@ -110,9 +110,7 @@ async def get_media_list(device_id: str):
     return device_thumbnails_cache.get(device_id, [])
 
 
-@app.post("/api/log_error/{device_id}")
-async def log_error_from_agent(device_id: str, error_log: ErrorLog):
-    """Ruta para que los agentes reporten errores para depuración remota."""
+   """Ruta para que los agentes reporten errores para depuración remota."""
     print(f"[ERROR REMOTO] Dispositivo {device_id[:8]}: {error_log.error}")
     return {"status": "log recibido"}
 
