@@ -76,6 +76,41 @@ async def get_media_list(device_id: str):
     """Ruta para que el panel pida la lista de miniaturas de un dispositivo."""
     return device_thumbnails_cache.get(device_id, [])
 
+# En tu clase ControlPanelApp en control_panel.py
+
+def create_widgets(self):
+    # ... (código para crear la lista de agentes) ...
+
+    # --- NUEVO: Panel de Logs de Errores ---
+    logs_frame = ttk.LabelFrame(self, text="Log de Errores de Agentes", padding=10)
+    logs_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    log_cols = ('time', 'device', 'message')
+    self.log_tree = ttk.Treeview(logs_frame, columns=log_cols, show='headings')
+    self.log_tree.heading('time', text='Hora')
+    self.log_tree.heading('device', text='Dispositivo')
+    self.log_tree.heading('message', text='Error Reportado')
+    self.log_tree.pack(fill=tk.BOTH, expand=True)
+
+    # ... (resto de widgets) ...
+
+def refresh_data(self): # Nueva función que actualiza todo
+    self.threaded_task(self._do_refresh_agents)
+    self.threaded_task(self._do_refresh_errors)
+
+def _do_refresh_errors(self):
+    try:
+        response = requests.get(f"{SERVER_URL}/api/get_error_logs", timeout=10)
+        logs = response.json()
+        self.after(0, self._update_log_tree, logs)
+    except Exception as e:
+        Logger.error(f"No se pudieron obtener los logs de error: {e}")
+
+def _update_log_tree(self, logs):
+    self.log_tree.delete(*self.log_tree.get_children())
+    for log in logs:
+        self.log_tree.insert('', 'end', values=(log['timestamp'], log.get('device_id', 'N/A')[:8], log['message']))
+
+
 @app.post("/api/log_error/{device_id}")
 async def log_error_from_agent(device_id: str, error_log: ErrorLog):
     """Ruta para que los agentes reporten errores para depuración remota."""
