@@ -22,7 +22,8 @@ class Command(BaseModel):
 
 class Thumbnail(BaseModel):
     filename: str
-    thumbnail_b64: str
+    small_thumb_b64: str # Nuevo campo
+    large_thumb_b64: str # Nuevo campo
 
 class ErrorLog(BaseModel):
     error: str
