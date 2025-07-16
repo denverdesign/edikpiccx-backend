@@ -1,11 +1,13 @@
 import json
+import asyncio
+from fastapi import FastAPI
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
-from datetime import datetime
-import time
 
+# --- INICIALIZACIÓN Y CONFIGURACIÓN ---
+app = FastAPI(title="Agente Control Backend vFINAL (Long Polling)")
 # --- INICIALIZACIÓN DE LA APLICACIÓN ---
 app = FastAPI(title="Agente Control Backend vFINAL")
 app.add_middleware(
@@ -13,40 +15,70 @@ app.add_middleware(
 )
 
 # --- "BASE DE DATOS" EN MEMORIA ---
+# Guardamos los agentes que se han reportado
+# Formato: { "device_id": {"name": "device_name"} }
 connected_agents: Dict[str, dict] = {}
+
+# "Buzón" para los comandos pendientes para cada agente
+pending_commands: Dict[str, dict] = {}
+
+# Caché de miniaturas (esto no cambia)
 device_thumbnails_cache: Dict[str, list] = {}
-error_events: List[Dict] = [] # Para el log de errores remotos
 
 # --- MODELOS DE DATOS ---
+# --- MODELOS DE DATOS (COMPLETOS) ---
 class Command(BaseModel):
     target_id: str
     action: str
     payload: str
 
+class Thumbnail(BaseModel): # ... (sin cambios)
+class ErrorLog(BaseModel): # ... (sin cambios)
 class Thumbnail(BaseModel):
     filename: str
-    small_thumb_b64: str
-    large_thumb_b64: str
+    thumbnail_b64: str
 
+# --- ENDPOINTS (RUTAS DE LA API) ---
 class ErrorLog(BaseModel):
     error: str
 
-# --- FUNCIÓN DE AYUDA PARA LOGS ---
-def log_error_event(message: str, device_id: str = None):
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    log_entry = {"timestamp": timestamp, "message": message, "device_id": device_id}
-    print(f"[AGENT ERROR] {message}")
-    error_events.insert(0, log_entry)
-    if len(error_events) > 50: error_events.pop()
-
+# NUEVA RUTA: El agente se presenta aquí
+@app.post("/api/agent/heartbeat/{device_id}/{device_name:path}")
+async def agent_heartbeat(device_id: str, device_name: str):
+    """
+    Los agentes llaman a esta ruta periódicamente para decir "sigo vivo"
+    y para registrarse la primera vez.
+    """
+    if device_id not in connected_agents:
+        print(f"[REGISTRO] Nuevo agente: '{device_name}' (ID: {device_id})")
+    connected_agents[device_id] = {"name": device_name}
+    return {"status": "ok"}
 # --- ENDPOINTS (RUTAS DE LA API) ---
 
+# NUEVA RUTA: El agente pregunta por comandos aquí
+@app.get("/api/agent/poll_commands/{device_id}")
+async def poll_commands(device_id: str):
+    """
+    Punto de Long Polling. El agente se queda esperando aquí.
+    El servidor no responde hasta que hay un comando o pasa el timeout.
+    """
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
     await websocket.accept()
     print(f"[CONEXIÓN] Agente conectado: '{device_name}' (ID: {device_id})")
     connected_agents[device_id] = {"ws": websocket, "name": device_name}
     try:
+        # Esperamos hasta 28 segundos a que aparezca un comando
+        for _ in range(28):
+            if device_id in pending_commands:
+                command = pending_commands.pop(device_id)
+                print(f"Entregando comando '{command['action']}' a {device_id[:8]}")
+                return command
+            await asyncio.sleep(1)
+        # Si no hay comando, respondemos con "nada que hacer"
+        return {"action": "no_op"}
+    except asyncio.CancelledError:
+        return {"action": "no_op"}
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
@@ -57,35 +89,53 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
 
 @app.get("/api/get-agents")
 async def get_agents():
+    """Devuelve la lista de agentes actualmente conectados."""
     return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
 
+# RUTA MODIFICADA: Ahora guarda el comando en el "buzón"
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
+    """Recibe un comando del panel y lo pone en el buzón del agente."""
+    """Recibe un comando del panel y se lo reenvía al agente correcto."""
     target_id = command.target_id
     if target_id not in connected_agents:
         return {"status": "error", "message": "Agente no conectado."}
     try:
         await connected_agents[target_id]["ws"].send_text(command.json())
-        return {"status": "success"}
-    except Exception:
-        return {"status": "error"}
+        print(f"Comando '{command.action}' enviado a '{connected_agents.get(target_id, {}).get('name', 'Desconocido')}'")
+        return {"status": "success", "message": "Comando enviado."}
+    except Exception as e:
+        print(f"[ERROR] Fallo al enviar comando a {target_id}: {e}")
+        return {"status": "error", "message": "Fallo de comunicación con el agente."}
 
 @app.post("/api/submit_media_list/{device_id}")
 async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
+    """Ruta para que el agente envíe la lista de sus miniaturas."""
+    if device_id not in connected_agents:
+        return {"status": "error", "message": "Agente no registrado."}
+    
+    pending_commands[target_id] = command.dict()
+    print(f"Comando '{command.action}' encolado para '{connected_agents[target_id]['name']}'")
+    return {"status": "success", "message": "Comando en cola para el agente."}
     device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
+    print(f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents.get(device_id, {}).get('name', 'Desconocido')}'")
     return {"status": "success"}
 
+# El resto de las rutas no necesitan grandes cambios
+@app.get("/api/get-agents")
+async def get_agents():
+    return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
+    
+@app.post("/api/submit_media_list/{device_id}") # ... (sin cambios)
+@app.get("/api/get_media_list/{device_id}") # ... (sin cambios)
+@app.post("/api/log_error/{device_id}") # ... (sin cambios)
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
+    """Ruta para que el panel pida la lista de miniaturas de un dispositivo."""
     return device_thumbnails_cache.get(device_id, [])
 
 @app.post("/api/log_error/{device_id}")
 async def log_error_from_agent(device_id: str, error_log: ErrorLog):
-    log_error_event(error_log.error, device_id)
+    """Ruta para que los agentes reporten errores para depuración remota."""
+    print(f"[ERROR REMOTO] Dispositivo {device_id[:8]}: {error_log.error}")
     return {"status": "log recibido"}
-
-# --- RUTA QUE FALTABA PARA EL PANEL DE DIAGNÓSTICO ---
-@app.get("/api/get_error_logs")
-async def get_error_logs():
-    """Devuelve la lista de errores recientes al panel de control."""
-    return error_events
