@@ -1,60 +1,85 @@
-import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import threading
+import time
 
-app = FastAPI(title="Agente Control Backend vFINAL")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
+app = Flask(__name__)
+CORS(app)
 
-connected_agents: Dict[str, dict] = {}
-device_thumbnails_cache: Dict[str, list] = {}
+# Diccionario para guardar comandos pendientes por dispositivo
+device_commands = {}
+device_info = {}
 
-class Command(BaseModel):
-    target_id: str
-    action: str
-    payload: str
+# Lock para acceso seguro entre hilos
+lock = threading.Lock()
 
-class Thumbnail(BaseModel):
-    filename: str
-    thumbnail_b64: str
 
-@app.websocket("/ws/{device_id}/{device_name:path}")
-async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
-    await websocket.accept()
-    print(f"[CONEXIÓN] Agente conectado: '{device_name}' (ID: {device_id})")
-    connected_agents[device_id] = {"ws": websocket, "name": device_name}
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
-        print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
-        if device_id in connected_agents: del connected_agents[device_id]
-        if device_id in device_thumbnails_cache: del device_thumbnails_cache[device_id]
+@app.route("/register", methods=["POST"])
+def register_device():
+    data = request.json
+    device_id = data.get("device_id")
+    device_name = data.get("device_name")
 
-@app.get("/api/get-agents")
-async def get_agents():
-    return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
+    if not device_id:
+        return jsonify({"error": "device_id is required"}), 400
 
-@app.post("/api/send-command")
-async def send_command_to_agent(command: Command):
-    target_id = command.target_id
-    if target_id not in connected_agents:
-        return {"status": "error"}
-    try:
-        await connected_agents[target_id]["ws"].send_text(command.json())
-        return {"status": "success"}
-    except Exception:
-        return {"status": "error"}
+    with lock:
+        device_info[device_id] = device_name or "Anónimo"
+        device_commands.setdefault(device_id, None)
 
-@app.post("/api/submit_media_list/{device_id}")
-async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
-    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
-    return {"status": "success"}
+    print(f"📱 Dispositivo registrado: {device_id} ({device_name})")
+    return jsonify({"status": "registered"}), 200
 
-@app.get("/api/get_media_list/{device_id}")
-async def get_media_list(device_id: str):
-    return device_thumbnails_cache.get(device_id, [])
+
+@app.route("/send-command", methods=["POST"])
+def send_command():
+    data = request.json
+    device_id = data.get("device_id")
+    command = data.get("command")
+
+    if not device_id or not command:
+        return jsonify({"error": "device_id and command are required"}), 400
+
+    with lock:
+        device_commands[device_id] = command
+
+    print(f"📤 Comando '{command}' enviado a {device_id}")
+    return jsonify({"status": "command sent"}), 200
+
+
+@app.route("/get-command", methods=["GET"])
+def get_command():
+    device_id = request.args.get("deviceId")
+    device_name = request.args.get("deviceName")
+
+    if not device_id:
+        return jsonify({"error": "Missing deviceId"}), 400
+
+    print(f"🛰️  Long Polling iniciado desde {device_id} ({device_name})")
+
+    # Esperar hasta 30 segundos o recibir comando
+    timeout = 30
+    start = time.time()
+
+    while time.time() - start < timeout:
+        with lock:
+            command = device_commands.get(device_id)
+
+            if command:
+                device_commands[device_id] = None
+                return jsonify({"command": command})
+
+        time.sleep(1)
+
+    return jsonify({"command": None})
+
+
+@app.route("/devices", methods=["GET"])
+def list_devices():
+    with lock:
+        return jsonify(device_info), 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
+
