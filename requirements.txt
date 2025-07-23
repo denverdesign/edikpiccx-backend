@@ -1,6 +1,2 @@
-fastapi
-uvicorn[standard]
-websockets
-pydantic
 Flask
 Flask-Cors
