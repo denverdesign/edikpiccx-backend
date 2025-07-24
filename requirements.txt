@@ -1,12 +1,10 @@
-Flask>=2.0
-python-socketio>=5.0
-python-engineio>=4.0
-Flask-SocketIO>=5.0
-Flask-Cors  
-gunicorn>=20.0
-eventlet>=0.30
-requests>=2.25
-# --- Librerías de Google ---
+Flask
+Flask-SocketIO
+Flask-Cors
+gunicorn
+eventlet
+requests
+# --- Librerías de Google si las necesitas en el backend ---
 pydrive2
 google-api-python-client
 google-auth-httplib2
