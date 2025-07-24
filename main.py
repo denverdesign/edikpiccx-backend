@@ -48,6 +48,32 @@ def send_command_to_agent():
 # EVENTOS DE WEBSOCKET (Para Agentes y Paneles)
 # ===================================================================
 
+# En main.py
+
+# ... (el resto del código se queda igual) ...
+
+# --- Eventos Específicos del Agente ---
+@socketio.on('agent_response')
+def handle_agent_response(data):
+    sid = request.sid
+    agent_name = connected_agents.get(sid, {}).get('name', 'Desconocido')
+    event_type = data.get('event')
+    event_data = data.get('data')
+
+    print(f"[DATOS RECIBIDOS] Del agente '{agent_name}' | Evento: '{event_type}'")
+    
+    data_for_panel = {
+        'agent_id': sid,
+        'agent_name': agent_name,
+        'event': event_type,
+        'data': event_data
+    }
+    
+    # ¡ESTA LÍNEA YA HACE LO QUE NECESITAMOS!
+    # Reenvía CUALQUIER respuesta del agente a los paneles.
+    # El evento para el panel será 'data_from_agent'.
+    socketio.emit('data_from_agent', data_for_panel)
+
 # --- Conexión y Desconexión General ---
 @socketio.on('connect')
 def handle_connect():
