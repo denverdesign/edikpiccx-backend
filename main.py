@@ -97,21 +97,28 @@ def handle_connect():
         # ¡NUEVO! Notificamos a todos los paneles que un nuevo agente se conectó
         socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    """
-    Se ejecuta cuando CUALQUIER cliente se desconecta.
-    """
+# En main.py
+
+@socketio.on('connect')
+def handle_connect():
+    client_type = request.args.get('type', 'agent')
     sid = request.sid
-    if sid in connected_panels:
-        connected_panels.pop(sid, None)
-        print(f"[PANEL DESCONECTADO] Un panel de control se ha desconectado (ID: {sid})")
-    elif sid in connected_agents:
-        agent_info = connected_agents.pop(sid, None)
-        if agent_info:
-            print(f"[AGENTE DESCONECTADO] Agente: '{agent_info.get('name')}' (ID: {sid})")
-            # ¡NUEVO! Notificamos a todos los paneles que un agente se desconectó
-            socketio.emit('agent_list_updated', list(connected_agents.values()))
+
+    if client_type == 'panel':
+        connected_panels[sid] = {'id': sid}
+        print(f"[PANEL CONECTADO] Nuevo panel de control conectado (ID: {sid})")
+        
+        # ¡¡¡SOLUCIÓN!!! Enviamos la lista actual de agentes
+        # al panel que acaba de conectarse.
+        emit('agent_list_updated', list(connected_agents.values()), to=sid)
+        
+    else: # Es un agente
+        # ... (el resto de la lógica del agente se queda igual) ...
+        device_name = request.args.get('deviceName', 'Desconocido')
+        connected_agents[sid] = {'id': sid, 'name': device_name, 'status': 'connected'}
+        print(f"[AGENTE CONECTADO] Nuevo agente: '{device_name}' (ID: {sid})")
+        # Notificamos a TODOS los paneles (incluyendo el que ya estaba)
+        socketio.emit('agent_list_updated', list(connected_agents.values()))
 
 # --- Eventos Específicos del Agente ---
 @socketio.on('agent_response')
