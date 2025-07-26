@@ -1,13 +1,13 @@
 fastapi
-uvicorn[standard]
-websockets
-pydantic
-Flask
-Flask-SocketIO
-Flask-Cors
-gunicorn
-eventlet
+uvicorn[standard]  # <-- El servidor correcto para FastAPI
+python-socketio
 requests
+pydantic
+# --- Y tus librerías de Google si las usas ---
+pydrive2
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
 # --- Librerías de Google si las necesitas en el backend ---
 pydrive2
 google-api-python-client
