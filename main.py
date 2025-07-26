@@ -1,8 +1,9 @@
-# main.py (Versión Final v2.2 - CORS Corregido)
-
+# ¡¡¡LA SOLUCIÓN!!!
+# Estas dos líneas DEBEN ser lo primero en todo el archivo.
 import eventlet
 eventlet.monkey_patch()
 
+# Ahora, el resto del código viene después.
 import os
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
@@ -12,13 +13,7 @@ from flask_cors import CORS
 # CONFIGURACIÓN INICIAL DE LA APLICACIÓN
 # ===================================================================
 app = Flask(__name__)
-# Esta línea de CORS sigue siendo buena para las rutas HTTP
-CORS(app, resources={r"/api/*": {"origins": "*"}})
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'una-clave-secreta-muy-segura!')
-
-# --- ¡¡¡LA SOLUCIÓN!!! ---
-# Añadimos 'cors_allowed_origins' directamente a SocketIO.
-# Esto le dice al servidor que acepte conexiones WebSocket desde CUALQUIER origen.
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 connected_agents = {}
