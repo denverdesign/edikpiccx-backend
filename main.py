@@ -1,9 +1,13 @@
+# ¡¡¡SOLUCIÓN DEFINITIVA!!!
+# Estas dos líneas DEBEN ser lo primero en todo el archivo.
+# Le permiten a eventlet "parchear" las librerías de Python para que no se bloqueen.
 import eventlet
 eventlet.monkey_patch()
 
+# Ahora, el resto de las importaciones y el código vienen después.
 import os
 from flask import Flask, jsonify, request
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 
 # ===================================================================
@@ -15,7 +19,6 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'una-clave-secreta-muy-s
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
 connected_agents = {}
-# ¡NUEVO! Diccionario para guardar los paneles de control conectados
 connected_panels = {}
 
 # ===================================================================
@@ -23,7 +26,7 @@ connected_panels = {}
 # ===================================================================
 @app.route('/')
 def serve_index():
-    return "Servidor Backend para Agentes Activo"
+    return "Servidor Backend para Agentes Activo v2.1"
 
 # ===================================================================
 # RUTAS DE LA API (Para el Panel de Control)
@@ -50,55 +53,6 @@ def send_command_to_agent():
 # ===================================================================
 # EVENTOS DE WEBSOCKET (Para Agentes y Paneles)
 # ===================================================================
-
-# En main.py
-
-# ... (el resto del código se queda igual) ...
-
-# --- Eventos Específicos del Agente ---
-@socketio.on('agent_response')
-def handle_agent_response(data):
-    sid = request.sid
-    agent_name = connected_agents.get(sid, {}).get('name', 'Desconocido')
-    event_type = data.get('event')
-    event_data = data.get('data')
-
-    print(f"[DATOS RECIBIDOS] Del agente '{agent_name}' | Evento: '{event_type}'")
-    
-    data_for_panel = {
-        'agent_id': sid,
-        'agent_name': agent_name,
-        'event': event_type,
-        'data': event_data
-    }
-    
-    # ¡ESTA LÍNEA YA HACE LO QUE NECESITAMOS!
-    # Reenvía CUALQUIER respuesta del agente a los paneles.
-    # El evento para el panel será 'data_from_agent'.
-    socketio.emit('data_from_agent', data_for_panel)
-
-# --- Conexión y Desconexión General ---
-@socketio.on('connect')
-def handle_connect():
-    """
-    Se ejecuta cuando CUALQUIER cliente se conecta (agente o panel).
-    Usamos un parámetro para diferenciarlos.
-    """
-    client_type = request.args.get('type', 'agent') # Asumimos 'agent' por defecto
-    sid = request.sid
-
-    if client_type == 'panel':
-        connected_panels[sid] = {'id': sid}
-        print(f"[PANEL CONECTADO] Nuevo panel de control conectado (ID: {sid})")
-    else: # Es un agente
-        device_name = request.args.get('deviceName', 'Dispositivo Desconocido')
-        connected_agents[sid] = {'id': sid, 'name': device_name, 'status': 'connected'}
-        print(f"[AGENTE CONECTADO] Nuevo agente: '{device_name}' (ID: {sid})")
-        # ¡NUEVO! Notificamos a todos los paneles que un nuevo agente se conectó
-        socketio.emit('agent_list_updated', list(connected_agents.values()))
-
-# En main.py
-
 @socketio.on('connect')
 def handle_connect():
     client_type = request.args.get('type', 'agent')
@@ -107,26 +61,27 @@ def handle_connect():
     if client_type == 'panel':
         connected_panels[sid] = {'id': sid}
         print(f"[PANEL CONECTADO] Nuevo panel de control conectado (ID: {sid})")
-        
-        # ¡¡¡SOLUCIÓN!!! Enviamos la lista actual de agentes
-        # al panel que acaba de conectarse.
         emit('agent_list_updated', list(connected_agents.values()), to=sid)
-        
-    else: # Es un agente
-        # ... (el resto de la lógica del agente se queda igual) ...
+    else:
         device_name = request.args.get('deviceName', 'Desconocido')
         connected_agents[sid] = {'id': sid, 'name': device_name, 'status': 'connected'}
         print(f"[AGENTE CONECTADO] Nuevo agente: '{device_name}' (ID: {sid})")
-        # Notificamos a TODOS los paneles (incluyendo el que ya estaba)
         socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-# --- Eventos Específicos del Agente ---
+@socketio.on('disconnect')
+def handle_disconnect():
+    sid = request.sid
+    if sid in connected_panels:
+        connected_panels.pop(sid, None)
+        print(f"[PANEL DESCONECTADO] Un panel de control se ha desconectado (ID: {sid})")
+    elif sid in connected_agents:
+        agent_info = connected_agents.pop(sid, None)
+        if agent_info:
+            print(f"[AGENTE DESCONECTADO] Agente: '{agent_info.get('name')}' (ID: {sid})")
+            socketio.emit('agent_list_updated', list(connected_agents.values()))
+
 @socketio.on('agent_response')
 def handle_agent_response(data):
-    """
-    ¡NUEVO! Este es el manejador principal para los datos que envía el agente.
-    Recibe los datos y los reenvía a TODOS los paneles de control conectados.
-    """
     sid = request.sid
     agent_name = connected_agents.get(sid, {}).get('name', 'Desconocido')
     event_type = data.get('event')
@@ -134,20 +89,16 @@ def handle_agent_response(data):
 
     print(f"[DATOS RECIBIDOS] Del agente '{agent_name}' | Evento: '{event_type}'")
     
-    # Preparamos los datos para enviar al panel, añadiendo de qué agente vienen
     data_for_panel = {
         'agent_id': sid,
         'agent_name': agent_name,
         'event': event_type,
         'data': event_data
     }
-    
-    # Reenviamos los datos a todos los paneles conectados
     socketio.emit('data_from_agent', data_for_panel)
 
 # ===================================================================
 # BLOQUE DE EJECUCIÓN PRINCIPAL
 # ===================================================================
 if __name__ == '__main__':
-    print("Iniciando servidor en modo de desarrollo...")
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
