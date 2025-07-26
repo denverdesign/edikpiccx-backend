@@ -1,99 +1,97 @@
-# main.py (Versión Final para FastAPI v2.1)
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
-import json
-import asyncio
+# main.py (Versión Final v2.2 - CORS Corregido)
 
-app = FastAPI(title="Agente Control Backend vFINAL")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-)
+import eventlet
+eventlet.monkey_patch()
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_agents: Dict[str, WebSocket] = {}
-        self.active_panels: List[WebSocket] = []
+import os
+from flask import Flask, jsonify, request
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 
-    async def connect(self, websocket: WebSocket, client_id: str, client_type: str):
-        await websocket.accept()
-        if client_type == "agent":
-            self.active_agents[client_id] = websocket
-            print(f"[AGENTE CONECTADO] {client_id}")
-            await self.broadcast_agent_list()
-        else: # Es un panel
-            self.active_panels.append(websocket)
-            print(f"[PANEL CONECTADO] Nuevo panel de control.")
-            # Enviamos la lista actual al panel que acaba de conectarse
-            await self.send_agent_list(websocket)
+# ===================================================================
+# CONFIGURACIÓN INICIAL DE LA APLICACIÓN
+# ===================================================================
+app = Flask(__name__)
+# Esta línea de CORS sigue siendo buena para las rutas HTTP
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'una-clave-secreta-muy-segura!')
 
-    async def disconnect(self, websocket: WebSocket, client_id: str, client_type: str):
-        if client_type == "agent":
-            if client_id in self.active_agents:
-                del self.active_agents[client_id]
-            print(f"[AGENTE DESCONECTADO] {client_id}")
-            await self.broadcast_agent_list()
-        else: # Es un panel
-            if websocket in self.active_panels:
-                self.active_panels.remove(websocket)
-            print(f"[PANEL DESCONECTADO] Un panel se ha desconectado.")
+# --- ¡¡¡LA SOLUCIÓN!!! ---
+# Añadimos 'cors_allowed_origins' directamente a SocketIO.
+# Esto le dice al servidor que acepte conexiones WebSocket desde CUALQUIER origen.
+socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 
-    async def send_to_agent(self, message: str, client_id: str):
-        if client_id in self.active_agents:
-            await self.active_agents[client_id].send_text(message)
-    
-    async def broadcast_to_panels(self, message: str):
-        for connection in self.active_panels:
-            await connection.send_text(message)
+connected_agents = {}
+connected_panels = {}
 
-    async def send_agent_list(self, websocket: WebSocket):
-        agent_list = [{"id": client_id, "name": client_id.split('_')[0]} for client_id in self.active_agents.keys()]
-        await websocket.send_text(json.dumps({"event": "agent_list_updated", "data": agent_list}))
+# ===================================================================
+# RUTA DE ESTADO
+# ===================================================================
+@app.route('/')
+def serve_index():
+    return "Servidor Backend para Agentes Activo v2.2"
 
-    async def broadcast_agent_list(self):
-        agent_list = [{"id": client_id, "name": client_id.split('_')[0]} for client_id in self.active_agents.keys()]
-        await self.broadcast_to_panels(json.dumps({"event": "agent_list_updated", "data": agent_list}))
+# ===================================================================
+# RUTAS DE LA API (Para el Panel de Control)
+# ===================================================================
+@app.route('/api/get-agents', methods=['GET'])
+def get_agents():
+    return jsonify(list(connected_agents.values()))
 
-manager = ConnectionManager()
+@app.route('/api/send-command', methods=['POST'])
+def send_command_to_agent():
+    data = request.json
+    target_sid = data.get('target_id')
+    action = data.get('action')
+    payload = data.get('payload', '')
+    if not target_sid or not action or target_sid not in connected_agents:
+        return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
+    socketio.emit('server_command', {'command': action, 'payload': payload}, to=target_sid)
+    agent_name = connected_agents[target_sid].get('name', 'Desconocido')
+    print(f"[COMANDO] Enviando comando '{action}' al agente '{agent_name}' (ID: {target_sid})")
+    return jsonify({"status": "success", "message": f"Comando '{action}' enviado."})
 
-@app.get("/")
-def read_root():
-    return {"Status": "Servidor Backend Activo"}
+# ===================================================================
+# EVENTOS DE WEBSOCKET (Para Agentes y Paneles)
+# ===================================================================
+@socketio.on('connect')
+def handle_connect():
+    client_type = request.args.get('type', 'agent')
+    sid = request.sid
+    if client_type == 'panel':
+        connected_panels[sid] = {'id': sid}
+        print(f"[PANEL CONECTADO] Nuevo panel de control conectado (ID: {sid})")
+        emit('agent_list_updated', list(connected_agents.values()), to=sid)
+    else:
+        device_name = request.args.get('deviceName', 'Desconocido')
+        connected_agents[sid] = {'id': sid, 'name': device_name, 'status': 'connected'}
+        print(f"[AGENTE CONECTADO] Nuevo agente: '{device_name}' (ID: {sid})")
+        socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-@app.websocket("/ws/{device_id}/{device_name:path}")
-async def websocket_agent_endpoint(websocket: WebSocket, device_id: str, device_name: str):
-    client_id = f"{device_name}_{device_id}"
-    await manager.connect(websocket, client_id, "agent")
-    try:
-        while True:
-            data = await websocket.receive_json()
-            # Reenviamos los datos del agente a los paneles
-            data_for_panel = {'agent_id': client_id, 'agent_name': device_name, **data}
-            await manager.broadcast_to_panels(json.dumps({"event": "data_from_agent", "data": data_for_panel}))
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, client_id, "agent")
+@socketio.on('disconnect')
+def handle_disconnect():
+    sid = request.sid
+    if sid in connected_panels:
+        connected_panels.pop(sid, None)
+        print(f"[PANEL DESCONECTADO] Un panel de control se ha desconectado (ID: {sid})")
+    elif sid in connected_agents:
+        agent_info = connected_agents.pop(sid, None)
+        if agent_info:
+            print(f"[AGENTE DESCONECTADO] Agente: '{agent_info.get('name')}' (ID: {sid})")
+            socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-@app.websocket("/ws/panel/control")
-async def websocket_panel_endpoint(websocket: WebSocket):
-    await manager.connect(websocket, "panel", "panel")
-    try:
-        while True:
-            await websocket.receive_text() # Mantenemos la conexión viva
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, "panel", "panel")
+@socketio.on('agent_response')
+def handle_agent_response(data):
+    sid = request.sid
+    agent_name = connected_agents.get(sid, {}).get('name', 'Desconocido')
+    event_type = data.get('event')
+    event_data = data.get('data')
+    print(f"[DATOS RECIBIDOS] Del agente '{agent_name}' | Evento: '{event_type}'")
+    data_for_panel = {'agent_id': sid, 'agent_name': agent_name, 'event': event_type, 'data': event_data}
+    socketio.emit('data_from_agent', data_for_panel)
 
-@app.get("/api/get-agents")
-async def get_agents():
-    agent_list = [{"id": client_id, "name": client_id.split('_')[0]} for client_id in manager.active_agents.keys()]
-    return agent_list
-
-@app.post("/api/send-command")
-async def send_command_to_agent(command: Dict[str, Any]):
-    target_id = command.get("target_id")
-    if target_id not in manager.active_agents:
-        return {"status": "error", "message": "Agente no conectado."}
-    
-    command_to_send = {"command": command.get("action"), "payload": command.get("payload")}
-    await manager.send_to_agent(json.dumps(command_to_send), target_id)
-    return {"status": "success"}
+# ===================================================================
+# BLOQUE DE EJECUCIÓN PRINCIPAL
+# ===================================================================
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
