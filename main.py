@@ -1,4 +1,4 @@
-# main.py (Versión Final "Acorazada" v3.1)
+# main.py (Versión Final v3.2 - Con Registro Post-Conexión)
 import eventlet
 eventlet.monkey_patch()
 
@@ -7,7 +7,6 @@ from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import json
-from datetime import datetime
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'una-clave-secreta-muy-segura!')
@@ -16,67 +15,25 @@ socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 connected_agents = {}
 connected_panels = {}
 
-# ===================================================================
-# RUTAS DE LA API (Para el Panel de Control)
-# ===================================================================
-
 @app.route('/')
 def serve_index():
-    return "Servidor Backend para Agentes Activo v3.1"
+    return "Servidor Backend para Agentes Activo v3.2"
 
-@app.route('/api/get-agents', methods=['GET'])
-def get_agents():
-    return jsonify(list(connected_agents.values()))
-
-@app.route('/api/send-command', methods=['POST'])
-def send_command_to_agent():
-    data = request.json
-    target_sid = data.get('target_id')
-    action = data.get('action')
-    payload = data.get('payload', '')
-    if not target_sid or not action or target_sid not in connected_agents:
-        return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
-    
-    command_to_send = {'command': action, 'payload': payload}
-    socketio.send(json.dumps(command_to_send), to=target_sid)
-    
-    agent_name = connected_agents[target_sid].get('name', 'Desconocido')
-    print(f"[COMANDO] Enviando comando '{action}' al agente '{agent_name}'")
-    return jsonify({"status": "success"})
-
-# --- ¡NUEVO MÉTODO ADICIONAL! Endpoint de Diagnóstico ---
-@app.route('/api/status', methods=['GET'])
-def get_server_status():
-    """
-    Devuelve un JSON con el estado actual del servidor para depuración.
-    """
-    return jsonify({
-        "server_status": "online",
-        "server_time_utc": datetime.utcnow().isoformat(),
-        "connected_agents_count": len(connected_agents),
-        "connected_panels_count": len(connected_panels),
-        "connected_agents_details": list(connected_agents.values())
-    })
-
-# ===================================================================
-# EVENTOS DE WEBSOCKET (Para Agentes y Paneles)
-# ===================================================================
+# ... (Las rutas /api/get-agents y /api/send-command se quedan igual) ...
 
 @socketio.on('connect')
 def handle_connect():
     client_type = request.args.get('type', 'agent')
     sid = request.sid
     if client_type == 'panel':
-        connected_panels[sid] = {'id': sid, 'connected_at': datetime.utcnow().isoformat()}
+        connected_panels[sid] = {'id': sid}
         print(f"[PANEL CONECTADO] (ID: {sid})")
-        # Le enviamos la lista de agentes al panel que acaba de conectarse
         emit('agent_list_updated', list(connected_agents.values()), to=sid)
-    else: # Es un agente
-        device_name = request.args.get('deviceName', 'Desconocido')
-        connected_agents[sid] = {'id': sid, 'name': device_name, 'status': 'connected'}
-        print(f"[AGENTE CONECTADO] '{device_name}' (ID: {sid})")
-        # Notificamos a TODOS los paneles que un nuevo agente se conectó
-        socketio.emit('agent_list_updated', list(connected_agents.values()))
+    else:
+        # El agente se conecta anónimamente al principio
+        connected_agents[sid] = {'id': sid, 'name': 'Conectando...', 'status': 'connecting'}
+        print(f"[CONEXIÓN INICIAL] Nuevo agente (ID: {sid}). Esperando registro...")
+        # No notificamos al panel todavía, esperamos a que el agente se identifique.
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -88,47 +45,25 @@ def handle_disconnect():
         agent_info = connected_agents.pop(sid, None)
         if agent_info:
             print(f"[AGENTE DESCONECTADO] '{agent_info.get('name')}'")
-            # Notificamos a TODOS los paneles que un agente se desconectó
             socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-# --- ¡NUEVO MÉTODO ADICIONAL! "Heartbeat" del Panel ---
-@socketio.on('panel_heartbeat')
-def handle_panel_heartbeat(data):
+# --- ¡NUEVO MÉTODO ADICIONAL! El manejador de registro ---
+@socketio.on('register_agent')
+def handle_agent_registration(data):
     """
-    Escucha los 'pings' del panel para confirmar que sigue activo.
+    Se ejecuta cuando un agente envía su información de identificación
+    justo después de conectarse.
     """
     sid = request.sid
-    print(f"[HEARTBEAT] Recibido 'ping' del panel (ID: {sid})")
-    # Opcional: podríamos responder con un 'pong' si fuera necesario
-    # emit('server_pong', {'status': 'alive'}, to=sid)
-
+    if sid in connected_agents:
+        device_name = data.get('deviceName', 'Desconocido')
+        # Actualizamos la entrada del agente con su nombre real
+        connected_agents[sid]['name'] = device_name
+        connected_agents[sid]['status'] = 'connected'
+        print(f"[AGENTE REGISTRADO] '{device_name}' (ID: {sid})")
+        # Ahora que tenemos el nombre, notificamos a los paneles
+        socketio.emit('agent_list_updated', list(connected_agents.values()))
 
 @socketio.on('message')
 def handle_agent_response(data):
-    sid = request.sid
-    if sid not in connected_agents:
-        print(f"[ADVERTENCIA] Mensaje recibido de un SID desconocido: {sid}")
-        return
-
-    agent_name = connected_agents[sid].get('name', 'Desconocido')
-    
-    try:
-        response_data = json.loads(data)
-        event_type = response_data.get('event')
-        event_payload = response_data.get('data')
-
-        print(f"[DATOS RECIBIDOS] Del agente '{agent_name}' | Evento: '{event_type}'")
-        
-        data_for_panel = {
-            'agent_id': sid,
-            'agent_name': agent_name,
-            'event': event_type,
-            'data': event_payload
-        }
-        # Reenviamos los datos a todos los paneles conectados
-        socketio.emit('data_from_agent', data_for_panel)
-    except Exception as e:
-        print(f"[ERROR] No se pudo procesar el mensaje del agente '{agent_name}': {e}. Datos recibidos: {data}")
-
-if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    # ... (esta función se queda igual) ...
