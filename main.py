@@ -33,9 +33,12 @@ def send_command_to_agent():
     if not target_sid or not action or target_sid not in connected_agents:
         return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
     
+    # --- LA PARTE IMPORTANTE ESTÁ AQUÍ ---
+    # Asegúrate de que estás creando un diccionario 'command_to_send'
+    # y luego convirtiéndolo a un string JSON.
     command_to_send = {'command': action, 'payload': payload}
-    # ESTO ESTÁ CORRECTO. Enviamos un mensaje genérico al agente.
-    socketio.send(json.dumps(command_to_send), to=target_sid) 
+    socketio.send(json.dumps(command_to_send), to=target_sid)
+    # ------------------------------------
     
     agent_name = connected_agents[target_sid].get('name', 'Desconocido')
     print(f"[COMANDO] Enviando comando '{action}' al agente '{agent_name}'")
