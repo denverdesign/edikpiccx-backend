@@ -1,4 +1,4 @@
-# main.py (Versión 3.3 - Corrección final del reenvío)
+# main.py (Versión 4.0 - FINAL - Escuchando el evento correcto)
 import eventlet
 eventlet.monkey_patch()
 
@@ -15,9 +15,10 @@ socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
 connected_agents = {}
 connected_panels = {}
 
+# ... (las rutas @app.route no cambian, déjalas como están) ...
 @app.route('/')
 def serve_index():
-    return "Servidor Backend para Agentes Activo v3.3"
+    return "Servidor Backend para Agentes Activo v4.0"
 
 @app.route('/api/get-agents', methods=['GET'])
 def get_agents():
@@ -33,12 +34,15 @@ def send_command_to_agent():
         return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
     
     command_to_send = {'command': action, 'payload': payload}
-    socketio.send(json.dumps(command_to_send), to=target_sid)
+    # ESTO ESTÁ CORRECTO. Enviamos un mensaje genérico al agente.
+    socketio.send(json.dumps(command_to_send), to=target_sid) 
     
     agent_name = connected_agents[target_sid].get('name', 'Desconocido')
     print(f"[COMANDO] Enviando comando '{action}' al agente '{agent_name}'")
     return jsonify({"status": "success"})
 
+
+# ... (las funciones de connect y disconnect no cambian) ...
 @socketio.on('connect')
 def handle_connect():
     client_type = request.args.get('type', 'agent')
@@ -65,25 +69,26 @@ def handle_disconnect():
             print(f"[AGENTE DESCONECTADO] '{agent_info.get('name')}'")
             socketio.emit('agent_list_updated', list(connected_agents.values()))
 
-# <-- ESTA ES LA VERSIÓN CORRECTA Y LIMPIA DE LA FUNCIÓN
+
+# --- ¡AQUÍ ESTÁ LA CORRECCIÓN FINAL! ---
 @socketio.on('agent_response')
-def handle_agent_response(data):
-    # ...
+def handle_agent_response(data): # 'data' ahora es un diccionario Python
+    sid = request.sid
+    if sid not in connected_agents:
+        return
 
     agent_name = connected_agents[sid].get('name', 'Desconocido')
-    
-    # 1. Imprime lo que recibes para estar seguro
-    print(f"[DATOS RECIBIDOS] Del agente '{agent_name}'. Reenviando al panel...")
-    print(f"--> Datos brutos: {data}")
+    print(f"[RESPUESTA RECIBIDA] Del agente '{agent_name}'. Reenviando al panel...")
+    print(f"--> Datos: {data}")
 
     try:
-        # 2. Reenvía los mismos datos brutos (el string JSON) a TODOS los paneles.
-        #    El panel ya sabe cómo interpretar este string, por el canal 'data_from_agent'.
-        socketio.emit('data_from_agent', data, broadcast=True)
-        
+        # Los datos ya están en el formato que el panel necesita.
+        # Simplemente los convertimos a string JSON y los reenviamos.
+        response_for_panel = json.dumps(data)
+        socketio.emit('data_from_agent', response_for_panel, broadcast=True)
     except Exception as e:
-        print(f"[ERROR] No se pudo reenviar el mensaje del agente '{agent_name}': {e}.")
+        print(f"[ERROR] No se pudo reenviar la respuesta del agente: {e}.")
 
-
+# ...
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
