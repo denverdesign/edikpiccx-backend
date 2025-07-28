@@ -66,12 +66,9 @@ def handle_disconnect():
             socketio.emit('agent_list_updated', list(connected_agents.values()))
 
 # <-- ESTA ES LA VERSIÓN CORRECTA Y LIMPIA DE LA FUNCIÓN
-@socketio.on('message')
-def handle_agent_response(data): # 'data' aquí es el STRING JSON de Android
-    sid = request.sid
-    if sid not in connected_agents:
-        print(f"[ADVERTENCIA] Mensaje recibido de un SID desconocido: {sid}")
-        return
+@socketio.on('agent_response')
+def handle_agent_response(data):
+    # ...
 
     agent_name = connected_agents[sid].get('name', 'Desconocido')
     
