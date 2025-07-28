@@ -24,25 +24,37 @@ def serve_index():
 def get_agents():
     return jsonify(list(connected_agents.values()))
 
+# Dentro de tu archivo main.py
+
 @app.route('/api/send-command', methods=['POST'])
 def send_command_to_agent():
-    data = request.json
-    target_sid = data.get('target_id')
-    action = data.get('action')
-    payload = data.get('payload', '')
-    if not target_sid or not action or target_sid not in connected_agents:
-        return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
-    
-    # --- LA PARTE IMPORTANTE ESTÁ AQUÍ ---
-    # Asegúrate de que estás creando un diccionario 'command_to_send'
-    # y luego convirtiéndolo a un string JSON.
-    command_to_send = {'command': action, 'payload': payload}
-    socketio.send(json.dumps(command_to_send), to=target_sid)
-    # ------------------------------------
-    
-    agent_name = connected_agents[target_sid].get('name', 'Desconocido')
-    print(f"[COMANDO] Enviando comando '{action}' al agente '{agent_name}'")
-    return jsonify({"status": "success"})
+    try:
+        data = request.json
+        target_sid = data.get('target_id')
+        action = data.get('action')
+        payload = data.get('payload', '')
+
+        if not target_sid or not action or target_sid not in connected_agents:
+            return jsonify({"status": "error", "message": "Agente no válido o desconectado"}), 404
+        
+        # 1. Crear un diccionario de Python.
+        command_to_send = {'command': action, 'payload': payload}
+
+        # 2. Convertir el diccionario a un STRING JSON.
+        json_string_to_send = json.dumps(command_to_send)
+
+        # 3. Enviar el STRING JSON usando socketio.send
+        socketio.send(json_string_to_send, to=target_sid)
+        
+        agent_name = connected_agents[target_sid].get('name', 'Desconocido')
+        print(f"[COMANDO ENVIADO] '{action}' al agente '{agent_name}'. JSON: {json_string_to_send}")
+        
+        return jsonify({"status": "success"})
+
+    except Exception as e:
+        # Añadimos un bloque try-except para ver si la función entera está fallando.
+        print(f"[ERROR CRÍTICO EN /api/send-command] {e}")
+        return jsonify({"status": "error", "message": "Internal Server Error"}), 500
 
 
 # ... (las funciones de connect y disconnect no cambian) ...
