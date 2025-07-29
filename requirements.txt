@@ -1,11 +1,4 @@
-Flask
-Flask-SocketIO
-Flask-Cors
-gunicorn
-eventlet      # <-- ¡LA LÍNEA CRUCIAL QUE FALTABA!
-requests
-# --- Librerías de Google (si las usas en este backend) ---
-pydrive2
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
+fastapi
+uvicorn[standard]
+websockets
+pydantic
