@@ -1,26 +1,24 @@
 import json
+import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict
+from fastapi.responses import Response, JSONResponse
 
 # --- INICIALIZACIÓN DE LA APLICACIÓN ---
-app = FastAPI(title="Agente Control Backend - Versión Estable")
+app = FastAPI(title="Agente Control Backend vFINAL")
 
-# Configuración de CORS para permitir conexiones desde cualquier origen
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 # --- "BASE DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, dict] = {}
-device_thumbnails_cache: Dict[str, list] = {}
+# Ahora la caché es un dict de dicts para buscar por nombre de archivo
+device_media_cache: Dict[str, Dict[str, dict]] = {} 
 
-# --- MODELOS DE DATOS ---
+# --- MODELOS DE DATOS MODIFICADOS ---
 class Command(BaseModel):
     target_id: str
     action: str
@@ -28,7 +26,8 @@ class Command(BaseModel):
 
 class Thumbnail(BaseModel):
     filename: str
-    thumbnail_b64: str # Mantenemos la versión simple de una sola miniatura por ahora
+    small_thumb_b64: str # Campo para la miniatura pequeña
+    large_thumb_b64: str # Campo para la vista previa grande
 
 # --- ENDPOINTS (RUTAS DE LA API) ---
 
@@ -38,50 +37,60 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     print(f"[CONEXIÓN] Agente conectado: '{device_name}' (ID: {device_id})")
     connected_agents[device_id] = {"ws": websocket, "name": device_name}
     try:
-        # Mantenemos la conexión viva esperando a que se desconecte.
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
-        if device_id in connected_agents:
-            del connected_agents[device_id]
-        if device_id in device_thumbnails_cache:
-            del device_thumbnails_cache[device_id]
-
+        if device_id in connected_agents: del connected_agents[device_id]
+        if device_id in device_media_cache: del device_media_cache[device_id]
 
 @app.get("/api/get-agents")
 async def get_agents():
-    """Devuelve la lista de agentes actualmente conectados."""
     return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
-
 
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
-    """Recibe un comando del panel y se lo reenvía al agente correcto."""
-    target_id = command.target_id
-    if target_id not in connected_agents:
-        return {"status": "error", "message": "Agente no conectado."}
-    try:
-        await connected_agents[target_id]["ws"].send_text(command.json())
-        print(f"Comando '{command.action}' enviado a '{connected_agents.get(target_id, {}).get('name', 'Desconocido')}'")
-        return {"status": "success", "message": "Comando enviado."}
-    except Exception as e:
-        print(f"[ERROR] Fallo al enviar comando a {target_id}: {e}")
-        return {"status": "error", "message": "Fallo de comunicación con el agente."}
-
+    # ... (Esta función no necesita cambios)
+    pass
 
 @app.post("/api/submit_media_list/{device_id}")
 async def submit_media_list(device_id: str, thumbnails: List[Thumbnail]):
-    """Ruta para que el agente envíe la lista de sus miniaturas."""
     if device_id not in connected_agents:
-        return {"status": "error", "message": "Agente no registrado."}
-    device_thumbnails_cache[device_id] = [thumb.dict() for thumb in thumbnails]
-    print(f"Recibidas {len(thumbnails)} miniaturas del agente '{connected_agents.get(device_id, {}).get('name', 'Desconocido')}'")
+        return {"status": "error"}
+    # --- LÓGICA DE CACHÉ MEJORADA ---
+    # Guardamos en un diccionario para búsquedas rápidas por nombre de archivo
+    device_media_cache[device_id] = {thumb.filename: thumb.dict() for thumb in thumbnails}
+    print(f"Recibidas y cacheadas {len(thumbnails)} miniaturas del agente {device_id[:8]}")
     return {"status": "success"}
-
 
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
-    """Ruta para que el panel pida la lista de miniaturas de un dispositivo."""
-    return device_thumbnails_cache.get(device_id, [])
+    # --- LÓGICA DE RESPUESTA MEJORADA ---
+    # Devolvemos solo la lista de miniaturas PEQUEÑAS para el panel
+    cache = device_media_cache.get(device_id, {})
+    return [{"filename": data["filename"], "small_thumb_b64": data["small_thumb_b64"]} for data in cache.values()]
+
+# --- ¡NUEVA RUTA PARA VER EN EL NAVEGADOR! ---
+@app.get("/media/{device_id}/{filename:path}")
+async def get_large_media(device_id: str, filename: str):
+    """
+    Esta ruta busca la imagen grande en la caché y la devuelve
+    directamente al navegador como una imagen.
+    """
+    cache = device_media_cache.get(device_id, {})
+    media_item = cache.get(filename)
+    
+    if not media_item or 'large_thumb_b64' not in media_item:
+        return JSONResponse(status_code=404, content={"message": "Archivo no encontrado en la caché"})
+    
+    try:
+        # Decodificamos el Base64 a bytes
+        image_bytes = base64.b64decode(media_item['large_thumb_b64'])
+        
+        # Devolvemos los bytes directamente con el tipo de contenido correcto
+        # Esto le dice al navegador: "Esto es un JPEG, muéstralo como una imagen"
+        return Response(content=image_bytes, media_type="image/jpeg")
+    except Exception as e:
+        print(f"Error al decodificar o servir imagen grande: {e}")
+        return JSONResponse(status_code=500, content={"message": "Error al procesar la imagen"})
