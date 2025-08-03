@@ -3,4 +3,4 @@ uvicorn
 websockets
 pydantic
 python-multipart 
-# <-- ¡LÍNEA AÑADIDA!
+
