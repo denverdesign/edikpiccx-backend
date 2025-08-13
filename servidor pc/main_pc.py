@@ -5,14 +5,15 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente PC - Backend")
+# --- INICIALIZACIÓN DE LA APP ---
+app = FastAPI(title="Agente PC - Backend (vFinal)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- "BASE DE DATOS" EN MEMORIA PARA EL PC ---
+# --- "BASE DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
-device_media_cache: Dict[str, Dict[str, Any]] = {} # Guardará miniaturas y originales
+device_media_cache: Dict[str, Dict[str, Any]] = {}
 fetch_status: Dict[str, str] = {}
 
 # --- MODELOS DE DATOS ---
@@ -31,27 +32,56 @@ class ThumbnailChunk(BaseModel):
 
 # --- ENDPOINTS ---
 
+@app.get("/")
+async def root():
+    return {"message": "Servidor del Agente de PC activo."}
+
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
-    # ... (Esta función es idéntica a la que ya tienes) ...
-    # ... (Maneja la conexión del agente de PC) ...
+    device_name_decoded = unquote(device_name)
+    await websocket.accept()
+    print(f"[PC-AGENT] Conectado: '{device_name_decoded}' (ID: {device_id})")
+    connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        name_to_print = connected_agents.get(device_id, {}).get("name", f"ID: {device_id}")
+        print(f"[PC-AGENT] Desconectado: '{name_to_print}'")
+        if device_id in connected_agents: del connected_agents[device_id]
+        if device_id in device_media_cache: del device_media_cache[device_id]
+        if device_id in fetch_status: del fetch_status[device_id]
 
 @app.get("/api/get-agents")
 async def get_agents():
-    # ... (Esta función es idéntica) ...
     return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
 
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
-    # ... (Esta función es idéntica) ...
-    # ... (Limpia la caché y reenvía la orden al agente de PC) ...
+    agent = connected_agents.get(command.target_id)
+    if not agent:
+        return {"status": "error", "message": "Agente no conectado"}
+    if command.action == "get_thumbnails":
+        print(f"Limpiando caché y reiniciando estado para {command.target_id[:8]}.")
+        device_media_cache[command.target_id] = {}
+        fetch_status[command.target_id] = "loading"
+    try:
+        await agent["ws"].send_text(command.json())
+        return {"status": "success", "message": "Comando enviado"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
-    # ... (Esta función es idéntica) ...
-    # ... (Recibe los lotes de miniaturas del PC) ...
+    if device_id not in device_media_cache:
+        device_media_cache[device_id] = {}
+    for thumb in chunk.thumbnails:
+        device_media_cache[device_id][thumb.filename] = {"small_thumb_b64": thumb.small_thumb_b64}
+    if chunk.is_final_chunk:
+        fetch_status[device_id] = "complete"
+        print(f"Recepción de lotes para {device_id[:8]} completada.")
+    return {"status": "chunk received"}
 
-# --- ¡NUEVA LÓGICA DIRECTA PARA EL PC! ---
 @app.post("/api/upload_original_file/{device_id}/{filename:path}")
 async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
     decoded_filename = unquote(filename)
@@ -67,8 +97,9 @@ async def upload_original_file(device_id: str, filename: str, file: UploadFile =
 
 @app.get("/api/get_media_list/{device_id}")
 async def get_media_list(device_id: str):
-    # ... (Esta función es idéntica) ...
-    # ... (Devuelve el estado y las miniaturas al panel) ...
+    status = fetch_status.get(device_id, "complete")
+    thumbnails = device_media_cache.get(device_id, {})
+    return {"status": status, "thumbnails": thumbnails}
 
 @app.get("/media/{device_id}/{filename:path}")
 async def get_large_media(device_id: str, filename: str):
@@ -77,18 +108,14 @@ async def get_large_media(device_id: str, filename: str):
     media_item = cache.get(decoded_filename)
     
     if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404)
+        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404, media_type="application/json")
     
     try:
         file_bytes = base64.b64decode(media_item['original_b64'])
-        # --- LÓGICA DE TIPO DE ARCHIVO MEJORADA ---
         media_type = "application/octet-stream"
         if decoded_filename.lower().endswith(('.jpg', '.jpeg')): media_type = "image/jpeg"
         elif decoded_filename.lower().endswith('.png'): media_type = "image/png"
         elif decoded_filename.lower().endswith('.mp4'): media_type = "video/mp4"
         return Response(content=file_bytes, media_type=media_type)
     except Exception as e:
-        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
-
-
-# El resto de las funciones idénticas van aquí...
+        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500, media_type="application/json")
