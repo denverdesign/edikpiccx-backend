@@ -90,4 +90,5 @@ async def get_large_media(device_id: str, filename: str):
     except Exception as e:
         return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
 
+
 # El resto de las funciones idénticas van aquí...
