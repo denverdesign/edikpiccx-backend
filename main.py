@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import unquote
 
-app = FastAPI(title="Faro Interior - Backend Android (Completo y Final)")
+app = FastAPI(title="Luz Guía - Backend Android (Completo y Final)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
