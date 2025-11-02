@@ -24,7 +24,7 @@ class Command(BaseModel):
 
 class Thumbnail(BaseModel):
     filename: str
-    small_thumb_b64: str
+    small_thumb_b64:  Any
 
 class ThumbnailChunk(BaseModel):
     thumbnails: List[Thumbnail]
@@ -33,7 +33,7 @@ class ThumbnailChunk(BaseModel):
 class BroadcastMessage(BaseModel):
     device_ids: List[str]
     image_b64: str
-    text: str
+    text:  Any
 
 # --- ENDPOINTS ---
 
