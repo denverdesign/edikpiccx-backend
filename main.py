@@ -19,10 +19,10 @@ fetch_status: Dict[str, str] = {}
 daily_message_cache: Dict[str, Dict[str, str]] = {}
 
 # --- MODELOS DE DATOS CORREGIDOS ---
-class Command(BaseModel):
-    target_id: str
-    action: str
-    payload: Any # <-- Flexible para aceptar cualquier tipo de dato
+class Thumbnail(BaseModel):
+    filename: str
+    filepath: str # <-- ¡CAMBIO CLAVE!
+    small_thumb_b64: str
 
 class Thumbnail(BaseModel):
     filename: str
