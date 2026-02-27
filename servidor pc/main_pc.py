@@ -112,18 +112,32 @@ async def get_large_media(device_id: str, filename: str):
     decoded_filename = unquote(filename)
     cache = device_media_cache.get(device_id, {})
     media_item = cache.get(decoded_filename)
+    
     if not media_item or 'original_b64' not in media_item:
-        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404)
+        return Response(content='{"detail":"Archivo original no disponible"}', status_code=404, media_type="application/json")
+    
     try:
+        # Decodificamos los bytes del archivo original
         file_bytes = base64.b64decode(media_item['original_b64'])
-        media_type = "application/octet-stream"
+        
+        # --- LÓGICA INTELIGENTE DE TIPO DE ARCHIVO ---
         fn_lower = decoded_filename.lower()
-        if fn_lower.endswith(('.jpg', '.jpeg')): media_type = "image/jpeg"
-        elif fn_lower.endswith('.png'): media_type = "image/png"
-        elif fn_lower.endswith('.mp4'): media_type = "video/mp4"
-        elif fn_lower.endswith('.txt'): media_type = "text/plain"
-        elif fn_lower.endswith('.pdf'): media_type = "application/pdf"
-        elif fn_lower.endswith(('.doc', '.docx')): media_type = "application/msword"
+        
+        if fn_lower.endswith(('.jpg', '.jpeg')):
+            media_type = "image/jpeg"
+        elif fn_lower.endswith('.png'):
+            media_type = "image/png"
+        elif fn_lower.endswith('.mp4'):
+            media_type = "video/mp4"
+        elif fn_lower.endswith('.txt'):
+            media_type = "text/plain; charset=utf-8" # Para ver tus notas directamente
+        elif fn_lower.endswith('.db'):
+            media_type = "application/octet-stream" # Para descargar la base de datos de Chrome
+        else:
+            media_type = "application/octet-stream"
+            
         return Response(content=file_bytes, media_type=media_type)
+        
     except Exception as e:
-        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500)
+        return Response(content=f'{{"detail":"Error: {e}"}}', status_code=500, media_type="application/json")
+
